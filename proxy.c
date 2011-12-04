@@ -60,13 +60,14 @@ int main(int argc, char **argv)
  */
 void doit(int fd) 
 {
-  /* variables required for chunking 
-   *  
-   
+  /* variables required for chunking    
   int chunked = 0; 
-  int chunksize, accumulator;*/
-//int is_static;
-  //struct stat sbuf;
+  int chunksize, accumulator;
+  */
+  /*
+  int is_static;
+  struct stat sbuf;
+  */
   char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
   //char filename[MAXLINE], cgiargs[MAXLINE];
   rio_t rio_c, rio_h;
