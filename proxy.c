@@ -115,7 +115,8 @@ void doit(int fd)
     do{
       Rio_readlineb(&rio_h,header,MAXLINE);
 
-      /* parse header for useful information 
+      /*INSERT INTO MERGED VERSION */
+      /* parse header for useful information */
       parseHeaderType(header,headertype);
       if(!strcmp(headertype,"Transfer-Encoding"))
 	sscanf(header, "%*s %s",option);{
@@ -124,7 +125,7 @@ void doit(int fd)
 	    printf("Chunked TE option detected\n");
 	}
       }
-      */
+      
       printf("%s",header);
       Rio_writen(fd,header, MAXLINE);
     }while(strcmp(header,"\r\n"));
@@ -263,6 +264,8 @@ void parseURL(char* url, char* host, char* uri)
 
   //  printf("output: url: %s\thost: %s\t uri: %s\n", url, host, uri);
 }
+
+/* INSERT INTO MERGED VERSION */
 
 /* parseHeaderType - given a header line, this will 
  * insert what the header type is into type
