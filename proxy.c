@@ -60,10 +60,6 @@ int main(int argc, char **argv)
  */
 void doit(int fd) 
 {
-  /* variables required for chunking    
-  int chunked = 0; 
-  int chunksize, accumulator;
-  */
   /*
   int is_static;
   struct stat sbuf;
@@ -74,7 +70,7 @@ void doit(int fd)
 
   /* Ren's Local Vars */
   char host[MAXLINE], url[MAXLINE], request[MAXLINE], header[MAXLINE];
-  /* char headertype[MAXLINE], option[MAXLINE]; */
+  char headertype[MAXLINE], option[MAXLINE];
   int hostfd;
   /* Ren's Local Vars END */
 
@@ -87,11 +83,7 @@ void doit(int fd)
   
   while(Rio_readlineb(&rio_c, buf, MAXLINE)!=0){
     sscanf(buf, "%s %s %s", method, url, version);
-    /* if (strcasecmp(method, "GET")) { 
-      clienterror(fd, method, "501", "Not Implemented",   
-		  "Tiny does not implement this method");
-      return;
-      }*/
+   
     printf("STUFF FROM THE CLIENT:\n");
     printf("%s\n",buf);
     read_requesthdrs(&rio_c);
@@ -130,14 +122,8 @@ void doit(int fd)
       Rio_writen(fd,header, MAXLINE);
     }while(strcmp(header,"\r\n"));
     printf("end of server response header\n");
-    /*
-    chunksize = 0;
-    accumulator = 0;*/
-    /* transfer info until EOF */
+
     while(Rio_readlineb(&rio_h, buf, MAXLINE)){
-      /*  if((chunking==TRUE) && (chunksize<accumulator+strlen(buf))){
-	
-	  printf("%s",buf);*/
       Rio_writen(fd, buf, MAXLINE);
     }
     printf("\nstream ended\n");
@@ -264,8 +250,6 @@ void parseURL(char* url, char* host, char* uri)
 
   //  printf("output: url: %s\thost: %s\t uri: %s\n", url, host, uri);
 }
-
-/* INSERT INTO MERGED VERSION */
 
 /* parseHeaderType - given a header line, this will 
  * insert what the header type is into type
