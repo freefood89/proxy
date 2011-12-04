@@ -7,12 +7,22 @@
 
 #define _GNU_SOURCE
 #define PORT 80
+#define TRUE 1
+#define FLASE 0
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "csapp.h"
+#include "sbuf.h"
 #define VERSION " HTTP/1.0\r\n"
+#define NTHREADS  8
+#define SBUFSIZE  16
+
+sbuf_t sbuf; /* shared buffer of connected descriptors */
+static int byte_cnt;  /* byte counter */
+static sem_t mutex;   /* and the mutex that protects it */
+
 
 /* FUNCTION PROTOTYPES */
 void doit(int fd);
@@ -27,6 +37,20 @@ void clienterror(int fd, char *cause, char *errnum,
 void genheader(char *host, char *header); 
 void genrequest(char *request, char *method, char *uri, char *version);
 void parseURL(char* url, char* host, char* uri);
+void parseHeaderType(char* header, char* type);
+
+/* Function Prototypes for Multiple Requests */
+void echo_cnt(int connfd);
+void *thread(void *vargp);
+static void init_echo_cnt(void);
+
+static void init_echo_cnt(void)
+{
+    Sem_init(&mutex, 0, 1);
+    byte_cnt = 0;
+}
+
+
 /* 
  * MAIN CODE AREA 
  */
@@ -50,6 +74,26 @@ int main(int argc, char **argv)
 
         Close(connfd);
     }
+
+    /* MULTIPLE REQUESTS */
+    int i;
+    clientlen = sizeof(struct sockaddr_in);
+    pthread_t tid; 
+
+    sbuf_init(&sbuf, SBUFSIZE); //line:conc:pre:initsbuf
+    listenfd = Open_listenfd(port);
+
+    for (i = 0; i < NTHREADS; i++)  /* Create worker threads */ //line:conc:pre:begincreate
+        Pthread_create(&tid, NULL, thread, NULL);               //line:conc:pre:endcreate
+
+    while (1) { 
+        connfd = Accept(listenfd, (SA *) &clientaddr, &clientlen);
+        sbuf_insert(&sbuf, connfd); /* Insert connfd in buffer */
+    }
+
+
+    /* END MULTIPLE REQUESTS */
+
 }
 
 /*
@@ -111,11 +155,86 @@ void doit(int fd)
 
         while(Rio_readlineb(&rio_h, buf, MAXLINE)){
             printf("%s",buf);
+            printf("-->after first 'end of server response header'\n");
             Rio_writen(fd, buf, MAXLINE);
         }
         printf("\nstream ended\n");
         //    Rio_writen(fd,"\r\n",MAXLINE); /*signify end of transmission */
         //printf("sent carriage return\n");
+        Close(hostfd); /* disconnect from host */
+        printf("closed connection with host\n");
+    }
+    printf("%s\n",buf);
+    /*
+       int is_static;
+       struct stat sbuf;
+       */
+    //char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
+    //char filename[MAXLINE], cgiargs[MAXLINE];
+    //rio_t rio_c, rio_h;
+
+    /* Ren's Local Vars */
+    //char host[MAXLINE], url[MAXLINE], request[MAXLINE], header[MAXLINE];
+    char headertype[MAXLINE], option[MAXLINE];
+    //int hostfd;
+    int chunked = 0;
+    /* Ren's Local Vars END */
+
+
+    /* Read request line and headers */
+    Rio_readinitb(&rio_c, fd);
+
+    /* loop while readline did not get EOF or error
+     * getting EOF means client closed connection */
+
+    while(Rio_readlineb(&rio_c, buf, MAXLINE)!=0){
+        sscanf(buf, "%s %s %s", method, url, version);
+
+        printf("STUFF FROM THE CLIENT:\n");
+        printf("%s\n",buf);
+        read_requesthdrs(&rio_c);
+
+        /* Ren's code */
+        parseURL(url, host, uri); /* parse url for hostname and uri */
+        hostfd = Open_clientfd(host, PORT); /* connect to host as client */
+        Rio_readinitb(&rio_h, hostfd); /* set up host file discriptor */
+
+        /* generate and send request to host*/  
+        genrequest(request, method, uri, version);
+        genheader(host, header);
+        strcat(request, header);
+        printf("STUFF TO THE SERVER:\n%s",request); 
+        Rio_writen(hostfd, request, strlen(request));
+
+        /* stream information from server to client */
+        printf("STUFF FROM THE SERVER:\n");
+
+        /* go through server response+header */
+        do{
+            Rio_readlineb(&rio_h,header,MAXLINE);
+
+            /*INSERT INTO MERGED VERSION */
+            /* parse header for useful information */
+            parseHeaderType(header,headertype);
+            if(!strcmp(headertype,"Transfer-Encoding"))
+                sscanf(header, "%*s %s",option);{
+                    if(!strcmp(option,"chunked")){
+                        chunked=1;
+                        printf("Chunked TE option detected\n");
+                    }
+                }
+
+            printf("%s",header);
+            Rio_writen(fd,header, MAXLINE);
+        }while(strcmp(header,"\r\n"));
+        printf("end of server response header\n");
+
+        while(Rio_readlineb(&rio_h, buf, MAXLINE)){
+            printf("--->after second 'end of server response header'\n");
+            Rio_writen(fd, buf, MAXLINE);
+
+        }
+        printf("\nstream ended\n");
         Close(hostfd); /* disconnect from host */
         printf("closed connection with host\n");
     }
@@ -195,6 +314,15 @@ void genrequest(char *request, char *method, char *uri, char *version){
     strcat(request," ");
     strcat(request, version);
     strcat(request,"\r\n");
+    /* create request string */
+    strcpy(request,method);
+    if (uri[strlen(uri)-1] == '/')
+        strcat(uri, "index.html");
+    strcat(request," ");
+    strcat(request, uri);
+    strcat(request," ");
+    strcat(request, version);
+    strcat(request,"\r\n");
 }
 
 /* genheader - generates a HTTP request header */
@@ -238,5 +366,61 @@ void parseURL(char* url, char* host, char* uri)
     strncpy(uri, nohttp + pos, len - pos);
 
     printf("output: url: %s\thost: %s\t uri: %s\n", url, host, uri);
+    //  printf("output: url: %s\thost: %s\t uri: %s\n", url, host, uri);
 }
+
+/* parseHeaderType - given a header line, this will 
+ * insert what the header type is into type
+ * type must be pre-allocated */
+void parseHeaderType(char* header, char* type){
+    int pos = 0;
+
+    /* header information type always terminated by ':' */
+    pos = strcspn(header, ":");
+    /* cpy the portion of header upto the ':' */
+    strncpy(type, header, pos); 
+}
+
+/* 
+ * echoservert_pre.c - A prethreaded concurrent echo server
+ */
+/* $begin echoservertpremain */
+
+void *thread(void *vargp) 
+{  
+    Pthread_detach(pthread_self()); 
+    while (1) { 
+        int connfd = sbuf_remove(&sbuf); /* Remove connfd from buffer */ //line:conc:pre:removeconnfd
+        echo_cnt(connfd);                /* Service client */
+        Close(connfd);
+    }
+}
+/* $end echoservertpremain */
+
+
+/* 
+ * A thread-safe version of echo that counts the total number
+ * of bytes received from clients.
+ */
+/* $begin echo_cnt */
+void echo_cnt(int connfd)
+{
+    int n; 
+    char buf[MAXLINE]; 
+    rio_t rio;
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+
+    Pthread_once(&once, init_echo_cnt); //line:conc:pre:pthreadonce
+    Rio_readinitb(&rio, connfd);        //line:conc:pre:rioinitb
+    while((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
+        P(&mutex);
+        byte_cnt += n; //line:conc:pre:cntaccess1
+        printf("thread %d received %d (%d total) bytes on fd %d\n", 
+                (int) pthread_self(), n, byte_cnt, connfd); //line:conc:pre:cntaccess2
+        V(&mutex);
+        Rio_writen(connfd, buf, n);
+    }
+}
+
+/* $end echo_cnt */
 
