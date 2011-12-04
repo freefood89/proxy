@@ -51,8 +51,9 @@ int main(int argc, char **argv)
 	while (1) {
 		doit(connfd);
 
-		Close(connfd);
+		//Close(connfd);
 	}
+	Close(connfd);
 }
 
 /*
@@ -80,7 +81,7 @@ void doit(int fd)
 	/* loop while readline did not get EOF or error
 	 * getting EOF means client closed connection */
   
-	while(Rio_readlineb(&rio_c, buf, MAXLINE)!=0){
+	if(Rio_readlineb(&rio_c, buf, MAXLINE)!=0){
 		printf("first line of while loop\n");
 		sscanf(buf, "%s %s %s", method, url, version);
    
@@ -104,19 +105,6 @@ void doit(int fd)
 		/* go through server response+header */
 		do{
 			Rio_readlineb(&rio_h,header,MAXLINE);
-
-			/*INSERT INTO MERGED VERSION */
-			/* parse header for useful information */
-			/*
-			parseHeaderType(header,headertype);
-			if(!strcmp(headertype,"Transfer-Encoding"))
-				sscanf(header, "%*s %s",option);{
-				if(!strcmp(option,"chunked")){
-					chunked=1;
-					printf("Chunked TE option detected\n");
-				}
-				}*/
-      
 			printf("%s",header);
 			Rio_writen(fd,header, MAXLINE);
 		}while(strcmp(header,"\r\n"));
@@ -128,10 +116,9 @@ void doit(int fd)
 		printf("\nstream ended\n");
 		Close(hostfd); /* disconnect from host */
 		printf("closed connection with host\n");
-		printf("last line of while loop\n");
 	}
 	printf("No longer connected to client\n");
-	printf("%s\n",buf);
+	//printf("%s\n",buf);
 }
 
 /*
@@ -143,21 +130,36 @@ void read_requesthdrs(rio_t *rp, int hostfd)
 	char type[MAXLINE];
 	char option[MAXLINE];
 
-	Rio_readlineb(rp, buf, MAXLINE);
-	printf("%s", buf);
-	while(strcmp(buf, "\r\n")) {
+	/* loop until the buf is just \r\n */
+	do{	
+		//if(strcmp(buf, "\r\n"))
+		//	break;
+		Rio_readlineb(rp, buf, MAXLINE);
 		parseHeaderType(buf,type);
 		if(!strcmp(type,"Proxy-Connection")){
 			sscanf(buf, "%*s %s",option);
 			if(!strcmp(option,"keep-alive")){
 				//persistence=1;
-				printf("keep-alive connection option detected\n");
+				//printf("keep-alive connection option detected\n");
 			}
+			strcpy(buf, "Connection: ");
+			strcat(buf, option);
+			strcat(buf, "\r\n");
+			Rio_writen(hostfd, buf, MAXLINE);
+			printf("%s", buf);
 		}
-		Rio_readlineb(rp, buf, MAXLINE);
-		Rio_writen(hostfd, buf, MAXLINE);
-		printf("%s", buf);
-	}
+		else if(!strcmp(type,"Cookie"))
+			;//	printf("NOTSENT: ");
+		else if(!strcmp(type, "User-Agent"))
+			;//printf("NOTSENT: ");
+		else{
+			Rio_writen(hostfd, buf, MAXLINE);
+			printf("%s", buf);
+		}
+
+
+	}while(strcmp(buf, "\r\n"));
+
 	return;
 }
 
@@ -227,21 +229,22 @@ void genheader(char *host,char *header){
 	strcat(header,"\r\n\r\n");
 }
 
-/*/////////// Added by Ben on 12/2/11*/
 
 /* Given a website, parses the url into its host and argument.
 
-   Input: char* url (Contains the full URL.), char** host (Garbage.), char** uri (Garbage.)
-   Output: char* url (Garbage.), char** host (Host name of the URL. ex: www.cmu.edu.), char** uri (Argument of the URL. Contains the remaining directory of the URL.)
+ * Input: char* url (Contains the full URL.), char** host (Garbage.), char** uri (Garbage.)
+ * Output: char* url (Garbage.), char** host (Host name of the URL. ex: www.cmu.edu.), 
+ *         char** uri (Argument of the URL. Contains the remaining directory of the URL.)
 
    Requires string.h and stdio.h. strchr(s, c) finds the first occurence of char c i
-   n string s.
-*/
+   n string s. */
 void parseURL(char* url, char* host, char* uri)
 {
 	int len = 0;
 	int pos;
-	int offset = 0; /* http:// has a length of 7. We should really be looking for the first space, but this is still guaranteed to work because it will be the first instance of http */
+	int offset = 0; 
+	/* http:// has a length of 7. We should really be looking for the first space, but 
+	 *this is still guaranteed to work because it will be the first instance of http */
 	char nohttp[MAXLINE];
 	//  char method[MAXLINE];
 
@@ -269,6 +272,7 @@ void parseURL(char* url, char* host, char* uri)
 void parseHeaderType(char* header, char* type){
 	int pos = 0;
 
+	memset(type,0,MAXLINE);
 	/* header information type always terminated by ':' */
 	pos = strcspn(header, ":");
 	/* cpy the portion of header upto the ':' */
