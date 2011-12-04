@@ -41,7 +41,7 @@ void parseHeaderType(char* header, char* type);
 int main(int argc, char **argv) 
 {
 	int listenfd, hostfd, port, clientlen;
-	int clientfd=0;
+	int *clientfd;
 	struct sockaddr_in clientaddr;
 
 	/* variables that may possibly move */
@@ -61,14 +61,16 @@ int main(int argc, char **argv)
 	
 	//while(1){
 	listenfd = Open_listenfd(port);
-	clientlen = sizeof(clientaddr); 
 	while(1){
 		do{ 
 			printf("persistence: %d\n",persistence);
-			clientfd=accept(listenfd,(SA *)&clientaddr,(socklen_t *)&clientlen);
-					
-			printf("new connection fd: %d\n", clientfd);
-			Rio_readinitb(&rio_c, clientfd);
+		  
+			clientlen = sizeof(clientaddr); 
+			clientfd = Malloc(sizeof(int));
+			*clientfd = Accept(listenfd,(SA *)&clientaddr,(socklen_t *)&clientlen);
+			printf("new connection fd: %d\n", *(int *)clientfd);
+		
+			Rio_readinitb(&rio_c, *clientfd);
 			//receive request
 			bzero(buf,MAXLINE);
 			Rio_readlineb(&rio_c, buf, MAXLINE);
@@ -107,20 +109,21 @@ int main(int argc, char **argv)
 				bzero(buf, MAXLINE);
 				Rio_readlineb(&rio_h,buf,MAXLINE);
 				dbg_printf("%s", buf);
-				Rio_writen(clientfd,buf, MAXLINE);
+				Rio_writen(*((int *)clientfd),buf, MAXLINE);
 			}while(strcmp(buf,"\r\n"));
 			dbg_printf("HOST HEADER TERMINATED\n");
 			//loop data
 			bzero(buf,MAXLINE);
 			while(Rio_readlineb(&rio_h,buf,MAXLINE)!=0){
 				dbg_printf("READ: %s", buf);
-				Rio_writen(clientfd, buf, strlen(buf));
+				Rio_writen(*((int *)clientfd), buf, strlen(buf));
 				bzero(buf,MAXLINE);
 			}
-			Close(clientfd);
+			Close(*clientfd);
+			free(clientfd);
 		}while(persistence==1);
 		Close(hostfd);
-		Close(clientfd);
+		Close(*clientfd);
 	}
 }
 
