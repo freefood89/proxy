@@ -7,6 +7,8 @@
 
 #define _GNU_SOURCE
 #define PORT 80
+#define TRUE 1
+#define FLASE 0
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +29,7 @@ void clienterror(int fd, char *cause, char *errnum,
 void genheader(char *host, char *header); 
 void genrequest(char *request, char *method, char *uri, char *version);
 void parseURL(char* url, char* host, char* uri);
+void parseHeaderType(char* header, char* type);
 /* 
  * MAIN CODE AREA 
  */
@@ -57,7 +60,12 @@ int main(int argc, char **argv)
  */
 void doit(int fd) 
 {
-  //int is_static;
+  /* variables required for chunking 
+   *  
+   
+  int chunked = 0; 
+  int chunksize, accumulator;*/
+//int is_static;
   //struct stat sbuf;
   char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
   //char filename[MAXLINE], cgiargs[MAXLINE];
@@ -65,6 +73,7 @@ void doit(int fd)
 
   /* Ren's Local Vars */
   char host[MAXLINE], url[MAXLINE], request[MAXLINE], header[MAXLINE];
+  /* char headertype[MAXLINE], option[MAXLINE]; */
   int hostfd;
   /* Ren's Local Vars END */
 
@@ -103,19 +112,33 @@ void doit(int fd)
 
     /* go through server response+header */
     do{
-      Rio_readlineb(&rio_h,buf,MAXLINE);
-      printf("%s",buf);
-      Rio_writen(fd,buf, MAXLINE);
-    }while(strcmp(buf,"\r\n"));
-    printf("end of server response header\n");
+      Rio_readlineb(&rio_h,header,MAXLINE);
 
+      /* parse header for useful information 
+      parseHeaderType(header,headertype);
+      if(!strcmp(headertype,"Transfer-Encoding"))
+	sscanf(header, "%*s %s",option);{
+	if(!strcmp(option,"chunked")){
+	    chunked=1;
+	    printf("Chunked TE option detected\n");
+	}
+      }
+      */
+      printf("%s",header);
+      Rio_writen(fd,header, MAXLINE);
+    }while(strcmp(header,"\r\n"));
+    printf("end of server response header\n");
+    /*
+    chunksize = 0;
+    accumulator = 0;*/
+    /* transfer info until EOF */
     while(Rio_readlineb(&rio_h, buf, MAXLINE)){
-      printf("%s",buf);
+      /*  if((chunking==TRUE) && (chunksize<accumulator+strlen(buf))){
+	
+	  printf("%s",buf);*/
       Rio_writen(fd, buf, MAXLINE);
     }
     printf("\nstream ended\n");
-    //    Rio_writen(fd,"\r\n",MAXLINE); /*signify end of transmission */
-    //printf("sent carriage return\n");
     Close(hostfd); /* disconnect from host */
     printf("closed connection with host\n");
   }
@@ -187,7 +210,7 @@ void get_filetype(char *filename, char *filetype)
 /* genrequest - compiles a HTTP request */
 void genrequest(char *request, char *method, char *uri, char *version){
   /* create request string */
-  strcpy(request,"GET");
+  strcpy(request,method);
   if (uri[strlen(uri)-1] == '/')
     strcat(uri, "index.html");
   strcat(request," ");
@@ -237,6 +260,17 @@ void parseURL(char* url, char* host, char* uri)
   strncpy(host, nohttp, pos);
   strncpy(uri, nohttp + pos, len - pos);
 
-  printf("output: url: %s\thost: %s\t uri: %s\n", url, host, uri);
+  //  printf("output: url: %s\thost: %s\t uri: %s\n", url, host, uri);
 }
 
+/* parseHeaderType - given a header line, this will 
+ * insert what the header type is into type
+ * type must be pre-allocated */
+void parseHeaderType(char* header, char* type){
+  int pos = 0;
+
+  /* header information type always terminated by ':' */
+  pos = strcspn(header, ":");
+  /* cpy the portion of header upto the ':' */
+  strncpy(type, header, pos); 
+}
