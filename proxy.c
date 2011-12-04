@@ -6,9 +6,16 @@
  */
 
 #define _GNU_SOURCE
-#define PORT 80
+#define DEBUG
+#define PORT 53392
 #define TRUE 1
 #define FLASE 0
+
+#ifdef DEBUG
+#define dbg_printf(...) printf(__VA_ARGS__)
+#else
+#define dbg_printf(...)
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,7 +25,7 @@
 
 /* FUNCTION PROTOTYPES */
 void doit(int fd);
-void read_requesthdrs(rio_t *rp, int hostfd, int persistence);
+void read_requesthdrs(rio_t *rp, int hostfd, int *persistence);
 int parse_uri(char *uri, char *filename, char *cgiargs);
 void serve_static(int fd, char *filename, int filesize);
 void get_filetype(char *filename, char *filetype);
@@ -35,8 +42,16 @@ void parseHeaderType(char* header, char* type);
  */
 int main(int argc, char **argv) 
 {
-	int listenfd, connfd, port, clientlen;
+	int listenfd, clientfd, hostfd, port, clientlen;
 	struct sockaddr_in clientaddr;
+
+	/* variables that may possibly move */
+	int persistence=0;
+	char buf[MAXLINE], url[MAXLINE], host[MAXLINE], uri[MAXLINE];
+	char method[MAXLINE], version[MAXLINE];
+	rio_t rio_c, rio_h;
+	/* end vars */
+
 
 	/* Check command line args */
 	if (argc != 2) {
@@ -45,15 +60,51 @@ int main(int argc, char **argv)
 	}
 	port = atoi(argv[1]);
 
-	listenfd = Open_listenfd(port);
-	clientlen = sizeof(clientaddr);  
-	connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
-	while (1) {
-		doit(connfd);
-
-		//Close(connfd);
+	while(1){
+		listenfd = Open_listenfd(port);
+		clientlen = sizeof(clientaddr);  
+		clientfd =Accept(listenfd,(SA *)&clientaddr,(socklen_t *)&clientlen);
+		Rio_readinitb(&rio_c, clientfd);
+		
+		do{ 
+			//parse request
+			bzero(buf,MAXLINE);
+			Rio_readlineb(&rio_c, buf, MAXLINE);
+			sscanf(buf, "%s %s %s", method, url, version);
+			//setup host
+			parseURL(url, host, uri);
+			hostfd = Open_clientfd(host, PORT);
+			Rio_readinitb(&rio_h, hostfd);
+			dbg_printf("CONNECTED TO HOST\n");
+			//transmit request
+			bzero(buf, MAXLINE);
+			genrequest(buf, method, uri, version);
+			Rio_writen(hostfd, buf, strlen(buf));
+			dbg_printf("REQUEST SENT\n");
+			//loop headers
+			read_requesthdrs(&rio_c, hostfd, &persistence);
+			dbg_printf("CLIENT TRANSMISSION TERMINATED\n");
+			
+			//parse response and header
+			do{
+				bzero(buf, MAXLINE);
+				Rio_readlineb(&rio_h,buf,MAXLINE);
+				dbg_printf("%s", buf);
+				Rio_writen(clientfd,buf, MAXLINE);
+			}while(strcmp(buf,"\r\n"));
+			dbg_printf("HOST HEADER TERMINATED\n");
+			//loop data
+			bzero(buf,MAXLINE);
+			while(Rio_readlineb(&rio_h,buf,MAXLINE)!=0){
+				Rio_writen(clientfd, buf, strlen(buf));
+				dbg_printf("%s", buf);
+				bzero(buf,MAXLINE);
+			}
+			//Close(hostfd);
+		}while(persistence==1);
+		Close(hostfd);
+		Close(clientfd);
 	}
-	Close(connfd);
 }
 
 /*
@@ -61,48 +112,32 @@ int main(int argc, char **argv)
  */
 void doit(int fd) 
 {
-	int persistence;
-	/*
-	  int is_static;
-	  struct stat sbuf;
-	*/
+	int persistence=0; //persistence 
 	char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
-	//char filename[MAXLINE], cgiargs[MAXLINE];
 	rio_t rio_c, rio_h;
-
-	/* Ren's Local Vars */
 	char host[MAXLINE], url[MAXLINE], request[MAXLINE], header[MAXLINE];
 	int hostfd;
-	/* Ren's Local Vars END */
-
 
 	/* Read request line and headers */
 	Rio_readinitb(&rio_c, fd);
 
 	/* loop while readline did not get EOF or error
 	 * getting EOF means client closed connection */
-  
 	if(Rio_readlineb(&rio_c, buf, MAXLINE)!=0){
 		printf("first line of while loop\n");
 		sscanf(buf, "%s %s %s", method, url, version);
-   
 		printf("REQUEST: %s",buf);
-
 		parseURL(url, host, uri); /* parse url for hostname and uri */
-		hostfd = Open_clientfd(host, PORT); /* connect to host as client */		
+		hostfd = Open_clientfd(host, PORT); /* connect to host as client */	   
 		Rio_readinitb(&rio_h, hostfd); /* set up host file discriptor */
 		printf("CONNECTED TO HOST\n");
-
 		genrequest(request, method, uri, version);
 		Rio_writen(hostfd, request, strlen(request));
 		printf("TO HOST: %s", request);
-
-		read_requesthdrs(&rio_c, hostfd);
+		read_requesthdrs(&rio_c, hostfd, &persistence);
 		printf("HEADERS SENT TO HOST\n");
-
 		/* stream information from server to client */
 		printf("STUFF FROM THE SERVER:\n");
-
 		/* go through server response+header */
 		do{
 			Rio_readlineb(&rio_h,header,MAXLINE);
@@ -125,7 +160,7 @@ void doit(int fd)
 /*
  * read_requesthdrs - read and parse HTTP request headers
  */
-void read_requesthdrs(rio_t *rp, int hostfd, int persistence) 
+void read_requesthdrs(rio_t *rp, int hostfd, int *persistence) 
 {
 	char buf[MAXLINE];
 	char type[MAXLINE];
@@ -133,21 +168,22 @@ void read_requesthdrs(rio_t *rp, int hostfd, int persistence)
 
 	/* loop until the buf is just \r\n */
 	do{	
-		//if(strcmp(buf, "\r\n"))
-		//	break;
 		Rio_readlineb(rp, buf, MAXLINE);
+		printf("%s",buf);
+
 		parseHeaderType(buf,type);
 		if(!strcmp(type,"Proxy-Connection")){
 			sscanf(buf, "%*s %s",option);
 			if(!strcmp(option,"keep-alive")){
-				//persistence=1;
-				//printf("keep-alive connection option detected\n");
+				*persistence=1;
+				dbg_printf("keep-alive connection option detected\n");
 			}
-			strcpy(buf, "Connection: ");
+			/* there is no need to send this */
+						strcpy(buf, "Connection: ");
 			strcat(buf, option);
 			strcat(buf, "\r\n");
 			Rio_writen(hostfd, buf, MAXLINE);
-			printf("%s", buf);
+			//printf("%s", buf);
 		}
 		else if(!strcmp(type,"Cookie"))
 			;//	printf("NOTSENT: ");
@@ -155,15 +191,12 @@ void read_requesthdrs(rio_t *rp, int hostfd, int persistence)
 			;//printf("NOTSENT: ");
 		else{
 			Rio_writen(hostfd, buf, MAXLINE);
-			printf("%s", buf);
+			//			printf("%s", buf);
 		}
-
-
 	}while(strcmp(buf, "\r\n"));
-
+	Rio_writen(hostfd,"\r\n\r\n",MAXLINE);
 	return;
 }
-
 
 /*
  * parse_uri - parse URI into filename and CGI args
@@ -279,3 +312,4 @@ void parseHeaderType(char* header, char* type){
 	/* cpy the portion of header upto the ':' */
 	strncpy(type, header, pos); 
 }
+
