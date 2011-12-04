@@ -1,8 +1,9 @@
 /*
+ * ----------------------------------------------------------
  * proxy.c - A simple proxy server
  *
  * by: Benjamin Shih (bshih1) & Rentaro Matsukata (rmatsuka)
- * ---------------------------------------------------------
+ * ----------------------------------------------------------
  */
 
 #define _GNU_SOURCE
@@ -21,34 +22,32 @@
 #include <stdlib.h>
 #include <string.h>
 #include "csapp.h"
-#define VERSION " HTTP/1.0\r\n"
+#define MAX_VERSION 8
 
 /* FUNCTION PROTOTYPES */
 void doit(int fd);
 void read_requesthdrs(rio_t *rp, int hostfd, int *persistence);
-int parse_uri(char *uri, char *filename, char *cgiargs);
-void serve_static(int fd, char *filename, int filesize);
-void get_filetype(char *filename, char *filetype);
-void serve_dynamic(int fd, char *filename, char *cgiargs);
 void clienterror(int fd, char *cause, char *errnum, 
                  char *shortmsg, char *longmsg);
 
 void genheader(char *host, char *header); 
-void genrequest(char *request, char *method, char *uri, char *version);
-void parseURL(char* url, char* host, char* uri);
+void genrequest(char *request, char *method, char *uri, char *version); 
+void getHost(char *url, char *host);
+void getURI(char *url, char *uri);
 void parseHeaderType(char* header, char* type);
 /* 
  * MAIN CODE AREA 
  */
 int main(int argc, char **argv) 
 {
-	int listenfd, clientfd, hostfd, port, clientlen;
+	int listenfd, hostfd, port, clientlen;
+	int clientfd=0;
 	struct sockaddr_in clientaddr;
 
 	/* variables that may possibly move */
 	int persistence=0;
 	char buf[MAXLINE], url[MAXLINE], host[MAXLINE], uri[MAXLINE];
-	char method[MAXLINE], version[MAXLINE];
+	char method[MAXLINE], version[MAX_VERSION];
 	rio_t rio_c, rio_h;
 	/* end vars */
 
@@ -59,23 +58,41 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 	port = atoi(argv[1]);
-
+	
+	//while(1){
+	listenfd = Open_listenfd(port);
+	clientlen = sizeof(clientaddr); 
 	while(1){
-		listenfd = Open_listenfd(port);
-		clientlen = sizeof(clientaddr);  
-		clientfd =Accept(listenfd,(SA *)&clientaddr,(socklen_t *)&clientlen);
-		Rio_readinitb(&rio_c, clientfd);
-		
 		do{ 
-			//parse request
+			printf("persistence: %d\n",persistence);
+			clientfd=accept(listenfd,(SA *)&clientaddr,(socklen_t *)&clientlen);
+					
+			printf("new connection fd: %d\n", clientfd);
+			Rio_readinitb(&rio_c, clientfd);
+			//receive request
 			bzero(buf,MAXLINE);
 			Rio_readlineb(&rio_c, buf, MAXLINE);
-			sscanf(buf, "%s %s %s", method, url, version);
-			//setup host
-			parseURL(url, host, uri);
-			hostfd = Open_clientfd(host, PORT);
-			Rio_readinitb(&rio_h, hostfd);
-			dbg_printf("CONNECTED TO HOST\n");
+			printf("RECEIVED REQUEST\n");
+			bzero(method, MAXLINE);
+			bzero(url, MAXLINE);
+			bzero(version, MAX_VERSION);
+					
+			if(!persistence){
+				//setup host
+				bzero(host,MAXLINE);
+				sscanf(buf, "%s %s %s", method, url, version);
+				
+				getHost(url, host);
+				hostfd = Open_clientfd(host, PORT);
+				Rio_readinitb(&rio_h, hostfd);
+				dbg_printf("CONNECTED TO HOST\n");
+				
+				getURI(url, uri);
+				//parseURL(url, host, uri); 
+			}			
+			else //host is already connected
+				sscanf(buf, "%s %s %s", method, uri, version);
+			
 			//transmit request
 			bzero(buf, MAXLINE);
 			genrequest(buf, method, uri, version);
@@ -96,65 +113,15 @@ int main(int argc, char **argv)
 			//loop data
 			bzero(buf,MAXLINE);
 			while(Rio_readlineb(&rio_h,buf,MAXLINE)!=0){
+				dbg_printf("READ: %s", buf);
 				Rio_writen(clientfd, buf, strlen(buf));
-				dbg_printf("%s", buf);
 				bzero(buf,MAXLINE);
 			}
-			//Close(hostfd);
+			Close(clientfd);
 		}while(persistence==1);
 		Close(hostfd);
 		Close(clientfd);
 	}
-}
-
-/*
- * doit - handle one HTTP request/response transaction
- */
-void doit(int fd) 
-{
-	int persistence=0; //persistence 
-	char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
-	rio_t rio_c, rio_h;
-	char host[MAXLINE], url[MAXLINE], request[MAXLINE], header[MAXLINE];
-	int hostfd;
-
-	/* Read request line and headers */
-	Rio_readinitb(&rio_c, fd);
-
-	/* loop while readline did not get EOF or error
-	 * getting EOF means client closed connection */
-	if(Rio_readlineb(&rio_c, buf, MAXLINE)!=0){
-		printf("first line of while loop\n");
-		sscanf(buf, "%s %s %s", method, url, version);
-		printf("REQUEST: %s",buf);
-		parseURL(url, host, uri); /* parse url for hostname and uri */
-		hostfd = Open_clientfd(host, PORT); /* connect to host as client */	   
-		Rio_readinitb(&rio_h, hostfd); /* set up host file discriptor */
-		printf("CONNECTED TO HOST\n");
-		genrequest(request, method, uri, version);
-		Rio_writen(hostfd, request, strlen(request));
-		printf("TO HOST: %s", request);
-		read_requesthdrs(&rio_c, hostfd, &persistence);
-		printf("HEADERS SENT TO HOST\n");
-		/* stream information from server to client */
-		printf("STUFF FROM THE SERVER:\n");
-		/* go through server response+header */
-		do{
-			Rio_readlineb(&rio_h,header,MAXLINE);
-			printf("%s",header);
-			Rio_writen(fd,header, MAXLINE);
-		}while(strcmp(header,"\r\n"));
-		printf("end of server response header\n");
-
-		while(Rio_readlineb(&rio_h, buf, MAXLINE)){
-			Rio_writen(fd, buf, MAXLINE);
-		}
-		printf("\nstream ended\n");
-		Close(hostfd); /* disconnect from host */
-		printf("closed connection with host\n");
-	}
-	printf("No longer connected to client\n");
-	//printf("%s\n",buf);
 }
 
 /*
@@ -168,9 +135,12 @@ void read_requesthdrs(rio_t *rp, int hostfd, int *persistence)
 
 	/* loop until the buf is just \r\n */
 	do{	
+		bzero(buf, MAXLINE);
 		Rio_readlineb(rp, buf, MAXLINE);
-		printf("%s",buf);
+		//printf("%s",buf);
 
+		bzero(type, MAXLINE);
+		bzero(option, MAXLINE);
 		parseHeaderType(buf,type);
 		if(!strcmp(type,"Proxy-Connection")){
 			sscanf(buf, "%*s %s",option);
@@ -178,77 +148,32 @@ void read_requesthdrs(rio_t *rp, int hostfd, int *persistence)
 				*persistence=1;
 				dbg_printf("keep-alive connection option detected\n");
 			}
-			/* there is no need to send this */
-						strcpy(buf, "Connection: ");
+			/* forward connection option to server */
+			bzero(buf, MAXLINE);			
+			strcpy(buf, "Connection: ");
 			strcat(buf, option);
 			strcat(buf, "\r\n");
-			Rio_writen(hostfd, buf, MAXLINE);
-			//printf("%s", buf);
+			Rio_writen(hostfd, buf, strlen(buf));
+			printf("%s", buf);
 		}
 		else if(!strcmp(type,"Cookie"))
 			;//	printf("NOTSENT: ");
 		else if(!strcmp(type, "User-Agent"))
-			;//printf("NOTSENT: ");
-		else{
-			Rio_writen(hostfd, buf, MAXLINE);
-			//			printf("%s", buf);
+			;// printf("NOTSENT: ");
+		else{ /* just send it */
+			Rio_writen(hostfd, buf, strlen(buf));
+			printf("%s", buf);
 		}
 	}while(strcmp(buf, "\r\n"));
-	Rio_writen(hostfd,"\r\n\r\n",MAXLINE);
 	return;
 }
 
-/*
- * parse_uri - parse URI into filename and CGI args
- *             return 0 if dynamic content, 1 if static
- */
-int parse_uri(char *uri, char *filename, char *cgiargs) 
-{
-	char *ptr;
-
-	if (!strstr(uri, "cgi-bin")) {  /* Static content */
-		strcpy(cgiargs, "");
-		strcpy(filename, ".");
-		strcat(filename, uri);
-		if (uri[strlen(uri)-1] == '/')
-			strcat(filename, "home.html");
-		return 1;
-	}
-	else {  /* Dynamic content */
-		ptr = index(uri, '?');
-		if (ptr) {
-			strcpy(cgiargs, ptr+1);
-			*ptr = '\0';
-		}
-		else 
-			strcpy(cgiargs, "");
-		strcpy(filename, ".");
-		strcat(filename, uri);
-		return 0;
-	}
-}
-
-/*
- * get_filetype - derive file type from file name
- */
-void get_filetype(char *filename, char *filetype) 
-{
-	if (strstr(filename, ".html"))
-		strcpy(filetype, "text/html");
-	else if (strstr(filename, ".gif"))
-		strcpy(filetype, "image/gif");
-	else if (strstr(filename, ".jpg"))
-		strcpy(filetype, "image/jpeg");
-	else
-		strcpy(filetype, "text/plain");
-}  
 
 /* genrequest - compiles a HTTP request */
 void genrequest(char *request, char *method, char *uri, char *version){
 	/* create request string */
+	bzero(request, MAXLINE);
 	strcpy(request,method);
-	/*if (uri[strlen(uri)-1] == '/')
-	  strcat(uri, "index.html");*/
 	strcat(request," ");
 	strcat(request, uri);
 	strcat(request," ");
@@ -264,40 +189,46 @@ void genheader(char *host,char *header){
 }
 
 
-/* Given a website, parses the url into its host and argument.
-
- * Input: char* url (Contains the full URL.), char** host (Garbage.), char** uri (Garbage.)
- * Output: char* url (Garbage.), char** host (Host name of the URL. ex: www.cmu.edu.), 
- *         char** uri (Argument of the URL. Contains the remaining directory of the URL.)
-
-   Requires string.h and stdio.h. strchr(s, c) finds the first occurence of char c i
-   n string s. */
-void parseURL(char* url, char* host, char* uri)
+/* parseURL - parses the url for hostname and uri
+ * Input: char* url (Contains URL)
+ * Output: char* host (Host name ex: www.cmu.edu.), 
+ *         char* uri (URI. Contains the directory/file name) 
+ */
+void getURI(char* url, char* uri)
 {
 	int len = 0;
 	int pos;
 	int offset = 0; 
-	/* http:// has a length of 7. We should really be looking for the first space, but 
-	 *this is still guaranteed to work because it will be the first instance of http */
 	char nohttp[MAXLINE];
-	//  char method[MAXLINE];
 
-	//sscanf(url, "%s %s %s", method, url, version);
+	/* len(http://) = 7 */
 	offset = strcspn(url, "http://") + 7;
 	len = strlen(url);
-	//printf("input -- url: %s\tmethod: %s\tversion: %s\n", url, method, version);
 
 	/* Removes the http:// from an url. */
 	strcpy(nohttp, url + offset);
-
-	//printf("string nohttp: %s\n", nohttp);
-
-	/* Searches for the url by looking for the first slash. */
+	/* Searches for the uri by looking for the first slash. */
 	pos = strcspn(nohttp, "/");
-	strncpy(host, nohttp, pos);
 	strncpy(uri, nohttp + pos, len - pos);
 
-	printf("EXTRACTED: url: %s\thost: %s\t uri: %s\n", url, host, uri);
+	printf("EXTRACTED: uri: %s\n", uri);
+}
+
+void getHost(char *url, char *host){
+	int pos;
+	int offset = 0; 
+	char nohttp[MAXLINE];
+
+	/* len(http://) = 7 */
+	offset = strcspn(url, "http://") + 7;
+
+	/* Removes the http:// from an url. */
+	strcpy(nohttp, url + offset);
+	/* Searches for the uri by looking for the first slash. */
+	pos = strcspn(nohttp, "/");
+	strncpy(host, nohttp, pos);
+
+	printf("EXTRACTED: host: %s\n", host);
 }
 
 /* parseHeaderType - given a header line, this will 
@@ -306,7 +237,6 @@ void parseURL(char* url, char* host, char* uri)
 void parseHeaderType(char* header, char* type){
 	int pos = 0;
 
-	memset(type,0,MAXLINE);
 	/* header information type always terminated by ':' */
 	pos = strcspn(header, ":");
 	/* cpy the portion of header upto the ':' */
