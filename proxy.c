@@ -18,7 +18,7 @@
 
 /* FUNCTION PROTOTYPES */
 void doit(int fd);
-void read_requesthdrs(rio_t *rp, int hostfd);
+void read_requesthdrs(rio_t *rp, int hostfd, int persistence);
 int parse_uri(char *uri, char *filename, char *cgiargs);
 void serve_static(int fd, char *filename, int filesize);
 void get_filetype(char *filename, char *filetype);
@@ -61,6 +61,7 @@ int main(int argc, char **argv)
  */
 void doit(int fd) 
 {
+	int persistence;
 	/*
 	  int is_static;
 	  struct stat sbuf;
@@ -124,7 +125,7 @@ void doit(int fd)
 /*
  * read_requesthdrs - read and parse HTTP request headers
  */
-void read_requesthdrs(rio_t *rp, int hostfd) 
+void read_requesthdrs(rio_t *rp, int hostfd, int persistence) 
 {
 	char buf[MAXLINE];
 	char type[MAXLINE];
