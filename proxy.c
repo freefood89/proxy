@@ -42,6 +42,7 @@ int main(int argc, char **argv)
 {
 	int listenfd, hostfd, port, clientlen;
 	int *clientfd;
+	int len;
 	struct sockaddr_in clientaddr;
 
 	/* variables that may possibly move */
@@ -61,11 +62,11 @@ int main(int argc, char **argv)
 	
 	//while(1){
 	listenfd = Open_listenfd(port);
+	clientlen = sizeof(clientaddr); 
 	while(1){
 		do{ 
 			printf("persistence: %d\n",persistence);
 		  
-			clientlen = sizeof(clientaddr); 
 			clientfd = Malloc(sizeof(int));
 			*clientfd = Accept(listenfd,(SA *)&clientaddr,(socklen_t *)&clientlen);
 			printf("new connection fd: %d\n", *(int *)clientfd);
@@ -114,21 +115,16 @@ int main(int argc, char **argv)
 			dbg_printf("HOST HEADER TERMINATED\n");
 			//loop data
 			bzero(buf,MAXLINE);
-			/* modification */
 			while((len = rio_readnb(&rio_h,buf,MAXLINE))>0){
 				dbg_printf("READ: %s", buf);
 				Rio_writen(*((int *)clientfd), buf, strlen(buf));
-				bzero(buf,MAXLINE);
 			}
-			/* end modification */
-			/*
-			while(Rio_readlineb(&rio_h,buf,MAXLINE)!=0){
-				dbg_printf("READ: %s", buf);
-				Rio_writen(*((int *)clientfd), buf, strlen(buf));
-				bzero(buf,MAXLINE);
-				}*/
-			Close(*clientfd);
-			free(clientfd);
+			Rio_writen(*((int *)clientfd), buf, strlen(buf));			
+			if(rio_readlineb(&rio_c,buf,strlen(buf) == 0)){
+				printf("client has closed connection\n");
+				Close(*(int *)clientfd);
+				free(clientfd);
+			}
 		}while(persistence==1);
 		Close(hostfd);
 		//	Close(*clientfd);
