@@ -273,7 +273,7 @@ void* thread(void* vargp)
     while(1)
     {
         /* Remove connfd from the buffer. */
-        int connfd = sbuf_remove(&sbuf);
+	    int *connfd = (int *)sbuf_remove(&sbuf);
         /* Service client. */
         proc_request((void *)connfd);
         Close(connfd);
