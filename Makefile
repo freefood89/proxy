@@ -14,7 +14,12 @@ csapp.o: csapp.c csapp.h
 proxy.o: proxy.c csapp.h
 	$(CC) $(CFLAGS) -c proxy.c
 
-proxy: proxy.o csapp.o sbuf.o
+proxy: proxy.o csapp.o
+
+client.o: client.c csapp.h
+	$(CC) $(CFLAGS) -c client.c
+
+client: client.o csapp.o
 
 submit:
 	(make clean; cd ..; tar czvf proxylab.tar.gz proxylab-handout)
