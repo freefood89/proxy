@@ -27,7 +27,6 @@
 /* Shared buffer size and number of threads. */
 #define NTHREADS 8
 #define SBUFSIZE 16
-
 #define MAX_VERSION 8
 
 /* FUNCTION PROTOTYPES */
@@ -43,6 +42,7 @@ void genrequest(char *request, char *method, char *uri, char *version);
 void getHost(char *url, char *host);
 void getURI(char *url, char *uri);
 void parseHeaderType(char* header, char* type);
+int clientconnected(rio_t *rio_c);
 
 /* Function Prototypes for Multiple Requests */
 void echo_cnt(int connfd);
@@ -92,7 +92,7 @@ int main(int argc, char **argv)
     while(1)
     {
         connfd = Accept(listenfd, (SA *) &clientaddr, &sockclientlen);
-        printf("client queued.\n");
+        //        printf("client queued.\n");
         /* Insert connfd into the buffer. */
         sbuf_insert(&sbuf, connfd);
     }
@@ -134,7 +134,7 @@ void proc_request(void *arg){
     dbg_printf("REQUEST SENT\n");
     //loop headers
     read_requesthdrs(&rio_c, hostfd);
-    dbg_printf("CLIENT TRANSMISSION TERMINATED\n");
+    dbg_printf("HOST RESPONDING\n");
 
     //parse response and header
     do{
@@ -142,7 +142,6 @@ void proc_request(void *arg){
         dbg_printf("%s", buf);
         Rio_writen(clientfd,buf, strlen(buf));
     }while(strcmp(buf,"\r\n"));
-    dbg_printf("HOST HEADER TERMINATED\n");
     //loop data
 
     while((len = rio_readnb(&rio_h,buf,MAXLINE))>0){
@@ -150,15 +149,10 @@ void proc_request(void *arg){
         Rio_writen(clientfd, buf, len);
     }
     Rio_writen(clientfd, buf, len);         
-
-    if((len = rio_readnb(&rio_c,buf,MAXLINE))==0){
-        dbg_printf("client end closed socket\n");
-    }
-    else
-        dbg_printf("client still connected\n");
+    //printf("client: %d\n",clientconnected(&rio_c));
     Close(clientfd);
     Close(hostfd);
-    dbg_printf("disconnected from client and host\n");
+    //dbg_printf("disconnected from client and host\n");
 }
 
 /*
@@ -183,7 +177,7 @@ void read_requesthdrs(rio_t *rp, int hostfd)
             strcpy(buf, type);
             strcat(buf, ": close\r\n");
             Rio_writen(hostfd, buf, strlen(buf));
-            printf("%s", buf);
+            dbg_printf("%s", buf);
         }
         else if(!strcmp(type,"Cookie"))
             ;// printf("NOTSENT: ");
@@ -191,7 +185,7 @@ void read_requesthdrs(rio_t *rp, int hostfd)
             ;// printf("NOTSENT: ");
         else{ /* just send it */
             Rio_writen(hostfd, buf, strlen(buf));
-            printf("%s", buf);
+            dbg_printf("%s", buf);
         }
     }while(strcmp(buf, "\r\n"));
     return;
@@ -240,7 +234,7 @@ void getURI(char* url, char* uri)
     pos = strcspn(nohttp, "/");
     strncpy(uri, nohttp + pos, len - pos);
 
-    printf("EXTRACTED: uri: %s\n", uri);
+    dbg_printf("EXTRACTED: uri: %s\n", uri);
 }
 
 int isURL(char *buf){   
@@ -263,9 +257,9 @@ void getHost(char *url, char *host){
     strcpy(nohttp, url + offset);
     /* Searches for the uri by looking for the first slash. */
     pos = strcspn(nohttp, "/");
+    bzero(host,MAXLINE);
     strncpy(host, nohttp, pos);
-
-    printf("EXTRACTED: host: %s\n", host);
+    dbg_printf("EXTRACTED: host: %s\n", host);
 }
 
 /* parseHeaderType - given a header line, this will 
@@ -285,16 +279,28 @@ void* thread(void* vargp)
 {
     int* clientfd;
     Pthread_detach(pthread_self());
-    while(1)
-    {
+    while(1){
         clientfd = Malloc(sizeof(int));
         /* Remove connfd from the buffer. */
         *clientfd = sbuf_remove(&sbuf);
-        printf("client unqueued.\n");
+        //        printf("client unqueued.\n");
         /* Service client. */
         proc_request((void *)clientfd);
         //Close((void *)clientfd);
         //free(clientfd);
+        printf("client disconnected\n");
     }
 }
 
+int clientconnected(rio_t *rio_c){
+	int len;
+	char buf[MAXLINE];
+	if((len = rio_readnb(rio_c,buf,MAXLINE))==0){
+		//dbg_printf("client end closed socket\n");
+        return 0;
+	}
+	else{
+	    //dbg_printf("client still connected\n");*/
+		return 1;
+	}
+}
