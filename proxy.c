@@ -26,9 +26,11 @@
 
 /* FUNCTION PROTOTYPES */
 void doit(int fd);
-void read_requesthdrs(rio_t *rp, int hostfd, int *persistence);
+void read_requesthdrs(rio_t *rp, int hostfd);
 void clienterror(int fd, char *cause, char *errnum, 
                  char *shortmsg, char *longmsg);
+
+int isURL(char *buf);
 
 void genheader(char *host, char *header); 
 void genrequest(char *request, char *method, char *uri, char *version); 
@@ -46,9 +48,8 @@ int main(int argc, char **argv)
 	struct sockaddr_in clientaddr;
 
 	/* variables that may possibly move */
-	int host_persist=0;
 	char buf[MAXLINE], url[MAXLINE], host[MAXLINE], uri[MAXLINE];
-	char method[MAXLINE], version[MAX_VERSION], response[MAXLINE], result[MAXLINE];
+	char method[MAXLINE], version[MAX_VERSION];
 	rio_t rio_c, rio_h;
 	/* end vars */
 
@@ -64,97 +65,76 @@ int main(int argc, char **argv)
 	listenfd = Open_listenfd(port);
 	clientlen = sizeof(clientaddr); 
 	while(1){
-		do{ 
-			printf("host-proxy persistence: %d\n",host_persist);
-		  
-			clientfd = Malloc(sizeof(int));
-			*clientfd = Accept(listenfd,(SA *)&clientaddr,(socklen_t *)&clientlen);
-			printf("new connection fd: %d\n", *(int *)clientfd);
+	
+			
+		clientfd = Malloc(sizeof(int));
+		*clientfd = Accept(listenfd,(SA *)&clientaddr,(socklen_t *)&clientlen);
+			
+		printf("new connection fd: %d\n", *(int *)clientfd);
 		
-			Rio_readinitb(&rio_c, *clientfd);
-			//receive request
-			bzero(buf,MAXLINE);
-			Rio_readlineb(&rio_c, buf, MAXLINE);
-			printf("%sRECEIVED REQUEST\n",buf);
-			bzero(method, MAXLINE);
-			bzero(url, MAXLINE);
-			bzero(version, MAX_VERSION);
+		Rio_readinitb(&rio_c, *clientfd);
+		//receive request
+		bzero(buf,MAXLINE);
+		Rio_readlineb(&rio_c, buf, MAXLINE);
+		printf("%sRECEIVED REQUEST\n",buf);
+		bzero(method, MAXLINE);
+		bzero(url, MAXLINE);
+		bzero(version, MAX_VERSION);
 					
-			if(!host_persist){
-				//setup host
-				bzero(host,MAXLINE);
-				sscanf(buf, "%s %s %s", method, url, version);
-				
-				getHost(url, host);
-				hostfd = Open_clientfd(host, PORT);
-				Rio_readinitb(&rio_h, hostfd);
-				dbg_printf("CONNECTED TO HOST\n");
-				
-				getURI(url, uri);
-			}			
-			else //host is already connected
-				sscanf(buf, "%s %s %s", method, uri, version);
+		//setup host
+		bzero(host,MAXLINE);
+		sscanf(buf, "%s %s %s", method, url, version);
+		if(isURL(url)==1){
+			getHost(url, host);
+			hostfd = Open_clientfd(host, PORT);
+			Rio_readinitb(&rio_h, hostfd);
+			dbg_printf("CONNECTED TO HOST\n");
+			getURI(url,uri);
+		}
+		else
+			strcpy(uri,url);
+		//transmit request
+		bzero(buf, MAXLINE);
+		genrequest(buf, method, uri, version);
+		Rio_writen(hostfd, buf, strlen(buf));
+		dbg_printf("REQUEST SENT\n");
+		//loop headers
+		read_requesthdrs(&rio_c, hostfd);
+		dbg_printf("CLIENT TRANSMISSION TERMINATED\n");
 			
-			//transmit request
-			bzero(buf, MAXLINE);
-			genrequest(buf, method, uri, version);
-			Rio_writen(hostfd, buf, strlen(buf));
-			dbg_printf("REQUEST SENT\n");
-			//loop headers
-			read_requesthdrs(&rio_c, hostfd, &host_persist);
-			dbg_printf("CLIENT TRANSMISSION TERMINATED\n");
-			
-			//parse response
+		//parse response and header
+		do{
 			Rio_readlineb(&rio_h,buf,MAXLINE);
-			sscanf(buf,"%s %s %s",version,response,result);
-			if(!strcmp(version,"HTTP/1.0")){
-				printf("server runs %s\n",version);
-				host_persist=0;
-			}
-			/*	strcpy(version, "HTTP/1.1");
-			strcat(version, " ");
-			strcat(version, response);
-			strcat(version, " ");
-			strcat(version, result);
-			strcpy(buf, version);
-			strcat(buf, "\r\n");*/
-			printf("%s",buf);
-			Rio_writen(*((int *)clientfd), buf, strlen(buf));
-			//parse header
-			do{
-				Rio_readlineb(&rio_h,buf,MAXLINE);
-				dbg_printf("%s", buf);
-				Rio_writen(*((int *)clientfd),buf, strlen(buf));
-			}while(strcmp(buf,"\r\n"));
-			dbg_printf("HOST HEADER TERMINATED\n");
-			//loop data
-			bzero(buf,MAXLINE);
+			dbg_printf("%s", buf);
+			Rio_writen(*((int *)clientfd),buf, strlen(buf));
+		}while(strcmp(buf,"\r\n"));
+		dbg_printf("HOST HEADER TERMINATED\n");
+		//loop data
+		bzero(buf,MAXLINE);
 			
-			while((len = rio_readnb(&rio_h,buf,MAXLINE))>0){
-				dbg_printf("READ: %s", buf);
-				Rio_writen(*((int *)clientfd), buf, strlen(buf));
-			}
-			Rio_writen(*((int *)clientfd), buf, strlen(buf));			
+		while((len = rio_readnb(&rio_h,buf,MAXLINE))>0){
+			dbg_printf("READ: %s", buf);
+			Rio_writen(*((int *)clientfd), buf, strlen(buf));
+		}
+		Rio_writen(*((int *)clientfd), buf, strlen(buf));			
 
-			if((len = rio_readnb(&rio_c,buf,MAXLINE))==0){
-				printf("client end closed socket\n");
-				Close(*(int *)clientfd);
-				printf("disconnect from client");
-				free(clientfd);
-			}
-			/* if host closes after every transaction */
-			if(!host_persist)
-				Close(hostfd);
-		}while(host_persist!=-1);
-		//Close(hostfd);
-		//	Close(*clientfd);
+		if((len = rio_readnb(&rio_c,buf,MAXLINE))==0){
+			printf("client end closed socket\n");
+		}
+		else
+			printf("client still connected\n");
+		Close(*(int *)clientfd);
+		Close(hostfd);
+		printf("disconnected from client and host\n");
+		free(clientfd);
+
 	}
 }
 
 /*
  * read_requesthdrs - read and parse HTTP request headers
  */
-void read_requesthdrs(rio_t *rp, int hostfd, int *persistence) 
+void read_requesthdrs(rio_t *rp, int hostfd) 
 {
 	char buf[MAXLINE];
 	char type[MAXLINE];
@@ -169,17 +149,12 @@ void read_requesthdrs(rio_t *rp, int hostfd, int *persistence)
 		bzero(type, MAXLINE);
 		bzero(option, MAXLINE);
 		parseHeaderType(buf,type);
-		if(!strcmp(type,"Proxy-Connection")){
+		if(!strcmp(type,"Proxy-Connection") || !strcmp(type,"Connection")){
 			sscanf(buf, "%*s %s",option);
-			if(!strcmp(option,"keep-alive")){
-				*persistence=1;
-				dbg_printf("keep-alive connection option detected\n");
-			}
 			/* forward connection option to server */
 			bzero(buf, MAXLINE);			
-			strcpy(buf, "Connection: ");
-			strcat(buf, option);
-			strcat(buf, "\r\n");
+			strcpy(buf, type);
+			strcat(buf, ": close\r\n");
 			Rio_writen(hostfd, buf, strlen(buf));
 			printf("%s", buf);
 		}
@@ -239,6 +214,14 @@ void getURI(char* url, char* uri)
 	strncpy(uri, nohttp + pos, len - pos);
 
 	printf("EXTRACTED: uri: %s\n", uri);
+}
+
+int isURL(char *buf){	
+	if(!buf)
+		return -1;
+	if(strlen(buf)==strcspn(buf, "http://"))
+		return 0;
+	return 1;
 }
 
 void getHost(char *url, char *host){
