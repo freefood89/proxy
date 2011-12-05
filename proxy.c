@@ -1,54 +1,55 @@
 /*
+ * ----------------------------------------------------------
  * proxy.c - A simple proxy server
  *
  * by: Benjamin Shih (bshih1) & Rentaro Matsukata (rmatsuka)
- * ---------------------------------------------------------
+ * ----------------------------------------------------------
  */
 
 #define _GNU_SOURCE
+#define DEBUG
 #define PORT 80
 #define TRUE 1
 #define FLASE 0
+
+#ifdef DEBUG
+#define dbg_printf(...) printf(__VA_ARGS__)
+#else
+#define dbg_printf(...)
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "csapp.h"
 #include "sbuf.h"
-#define VERSION " HTTP/1.0\r\n"
-#define NTHREADS  8
-#define SBUFSIZE  16
 
-sbuf_t sbuf; /* shared buffer of connected descriptors */
-static int byte_cnt;  /* byte counter */
-static sem_t mutex;   /* and the mutex that protects it */
+/* Shared buffer size and number of threads. */
+#define NTHREADS 8
+#define SBUFSIZE 16
 
+#define MAX_VERSION 8
 
 /* FUNCTION PROTOTYPES */
-void doit(int fd);
-void read_requesthdrs(rio_t *rp);
-int parse_uri(char *uri, char *filename, char *cgiargs);
-void serve_static(int fd, char *filename, int filesize);
-void get_filetype(char *filename, char *filetype);
-void serve_dynamic(int fd, char *filename, char *cgiargs);
+void proq_request(int fd);
+void read_requesthdrs(rio_t *rp, int hostfd);
 void clienterror(int fd, char *cause, char *errnum, 
         char *shortmsg, char *longmsg);
 
+int isURL(char *buf);
+
 void genheader(char *host, char *header); 
-void genrequest(char *request, char *method, char *uri, char *version);
-void parseURL(char* url, char* host, char* uri);
+void genrequest(char *request, char *method, char *uri, char *version); 
+void getHost(char *url, char *host);
+void getURI(char *url, char *uri);
 void parseHeaderType(char* header, char* type);
 
 /* Function Prototypes for Multiple Requests */
 void echo_cnt(int connfd);
-void *thread(void *vargp);
-static void init_echo_cnt(void);
+void* thread(void *vargp);
 
-static void init_echo_cnt(void)
-{
-    Sem_init(&mutex, 0, 1);
-    byte_cnt = 0;
-}
+/* Shared buffer for all of the connected descriptors */
+sbuf_t sbuf;
 
 
 /* 
@@ -56,8 +57,25 @@ static void init_echo_cnt(void)
  */
 int main(int argc, char **argv) 
 {
-    int listenfd, connfd, port, clientlen;
+    int listenfd, hostfd, port, clientlen;
+    int *clientfd;
+    int len;
     struct sockaddr_in clientaddr;
+
+
+    /* Variables for Multiple Requests */
+    int i,  connfd;
+    socklen_t  sockclientlen = sizeof(struct sockaddr_in);
+    pthread_t tid;
+
+    /* END Variables for Multiple Requests */
+
+    /* variables that may possibly move */
+    char buf[MAXLINE], url[MAXLINE], host[MAXLINE], uri[MAXLINE];
+    char method[MAXLINE], version[MAX_VERSION];
+    rio_t rio_c, rio_h;
+    /* end vars */
+
 
     /* Check command line args */
     if (argc != 2) {
@@ -66,258 +84,142 @@ int main(int argc, char **argv)
     }
     port = atoi(argv[1]);
 
+    //while(1){
     listenfd = Open_listenfd(port);
-    clientlen = sizeof(clientaddr);  
-    connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
-    while (1) {
-        doit(connfd);
-
-        Close(connfd);
-    }
-
-    /* MULTIPLE REQUESTS */
-    int i;
-    clientlen = sizeof(struct sockaddr_in);
-    pthread_t tid; 
-
-    sbuf_init(&sbuf, SBUFSIZE); //line:conc:pre:initsbuf
-    listenfd = Open_listenfd(port);
-
-    for (i = 0; i < NTHREADS; i++)  /* Create worker threads */ //line:conc:pre:begincreate
-        Pthread_create(&tid, NULL, thread, NULL);               //line:conc:pre:endcreate
-
-    while (1) { 
-        connfd = Accept(listenfd, (SA *) &clientaddr, &clientlen);
-        sbuf_insert(&sbuf, connfd); /* Insert connfd in buffer */
-    }
+    clientlen = sizeof(clientaddr); 
+    while(1){
 
 
-    /* END MULTIPLE REQUESTS */
+        clientfd = Malloc(sizeof(int));
+        *clientfd = Accept(listenfd,(SA *)&clientaddr,(socklen_t *)&clientlen);
 
-}
+        printf("new connection fd: %d\n", *(int *)clientfd);
 
-/*
- * doit - handle one HTTP request/response transaction
- */
-void doit(int fd) 
-{
-    //int is_static;
-    //struct stat sbuf;
-    char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
-    //char filename[MAXLINE], cgiargs[MAXLINE];
-    rio_t rio_c, rio_h;
+        Rio_readinitb(&rio_c, *clientfd);
+        //receive request
+        bzero(buf,MAXLINE);
+        Rio_readlineb(&rio_c, buf, MAXLINE);
+        dbg_printf("%sRECEIVED REQUEST\n",buf);
+        bzero(method, MAXLINE);
+        bzero(url, MAXLINE);
+        bzero(version, MAX_VERSION);
 
-    /* Ren's Local Vars */
-    char host[MAXLINE], url[MAXLINE], request[MAXLINE], header[MAXLINE];
-    int hostfd;
-    /* Ren's Local Vars END */
-
-
-    /* Read request line and headers */
-    Rio_readinitb(&rio_c, fd);
-
-    /* loop while readline did not get EOF or error
-     * getting EOF means client closed connection */
-
-    while(Rio_readlineb(&rio_c, buf, MAXLINE)!=0){
+        //setup host
+        bzero(host,MAXLINE);
         sscanf(buf, "%s %s %s", method, url, version);
-        /* if (strcasecmp(method, "GET")) { 
-           clienterror(fd, method, "501", "Not Implemented",   
-           "Tiny does not implement this method");
-           return;
-           }*/
-        printf("STUFF FROM THE CLIENT:\n");
-        printf("%s\n",buf);
-        read_requesthdrs(&rio_c);
+        if(isURL(url)==1){
+            getHost(url, host);
+            hostfd = Open_clientfd(host, PORT);
+            Rio_readinitb(&rio_h, hostfd);
+            dbg_printf("CONNECTED TO HOST\n");
+            getURI(url,uri);
+        }
+        else
+            strcpy(uri,url);
+        //transmit request
+        bzero(buf, MAXLINE);
+        genrequest(buf, method, uri, version);
+        Rio_writen(hostfd, buf, strlen(buf));
+        dbg_printf("REQUEST SENT\n");
+        //loop headers
+        read_requesthdrs(&rio_c, hostfd);
+        dbg_printf("CLIENT TRANSMISSION TERMINATED\n");
 
-        /* Ren's code */
-        parseURL(url, host, uri); /* parse url for hostname and uri */
-        hostfd = Open_clientfd(host, PORT); /* connect to host as client */
-        Rio_readinitb(&rio_h, hostfd); /* set up host file discriptor */
-
-        /* generate and send request to host*/  
-        genrequest(request, method, uri, version);
-        genheader(host, header);
-        strcat(request, header);
-        printf("STUFF TO THE SERVER:\n%s",request); 
-        Rio_writen(hostfd, request, strlen(request));
-
-        /* stream information from server to client */
-        printf("STUFF FROM THE SERVER:\n");
-
-        /* go through server response+header */
+        //parse response and header
         do{
             Rio_readlineb(&rio_h,buf,MAXLINE);
-            printf("%s",buf);
-            Rio_writen(fd,buf, MAXLINE);
+            dbg_printf("%s", buf);
+            Rio_writen(*((int *)clientfd),buf, strlen(buf));
         }while(strcmp(buf,"\r\n"));
-        printf("end of server response header\n");
+        dbg_printf("HOST HEADER TERMINATED\n");
+        //loop data
+        bzero(buf,MAXLINE);
 
-        while(Rio_readlineb(&rio_h, buf, MAXLINE)){
-            printf("%s",buf);
-            printf("-->after first 'end of server response header'\n");
-            Rio_writen(fd, buf, MAXLINE);
+        while((len = rio_readnb(&rio_h,buf,MAXLINE))>0){
+            dbg_printf("READ: %s", buf);
+            Rio_writen(*((int *)clientfd), buf, len);
         }
-        printf("\nstream ended\n");
-        //    Rio_writen(fd,"\r\n",MAXLINE); /*signify end of transmission */
-        //printf("sent carriage return\n");
-        Close(hostfd); /* disconnect from host */
-        printf("closed connection with host\n");
-    }
-    printf("%s\n",buf);
-    /*
-       int is_static;
-       struct stat sbuf;
-       */
-    //char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
-    //char filename[MAXLINE], cgiargs[MAXLINE];
-    //rio_t rio_c, rio_h;
+        Rio_writen(*((int *)clientfd), buf, len);           
 
-    /* Ren's Local Vars */
-    //char host[MAXLINE], url[MAXLINE], request[MAXLINE], header[MAXLINE];
-    char headertype[MAXLINE], option[MAXLINE];
-    //int hostfd;
-    int chunked = 0;
-    /* Ren's Local Vars END */
-
-
-    /* Read request line and headers */
-    Rio_readinitb(&rio_c, fd);
-
-    /* loop while readline did not get EOF or error
-     * getting EOF means client closed connection */
-
-    while(Rio_readlineb(&rio_c, buf, MAXLINE)!=0){
-        sscanf(buf, "%s %s %s", method, url, version);
-
-        printf("STUFF FROM THE CLIENT:\n");
-        printf("%s\n",buf);
-        read_requesthdrs(&rio_c);
-
-        /* Ren's code */
-        parseURL(url, host, uri); /* parse url for hostname and uri */
-        hostfd = Open_clientfd(host, PORT); /* connect to host as client */
-        Rio_readinitb(&rio_h, hostfd); /* set up host file discriptor */
-
-        /* generate and send request to host*/  
-        genrequest(request, method, uri, version);
-        genheader(host, header);
-        strcat(request, header);
-        printf("STUFF TO THE SERVER:\n%s",request); 
-        Rio_writen(hostfd, request, strlen(request));
-
-        /* stream information from server to client */
-        printf("STUFF FROM THE SERVER:\n");
-
-        /* go through server response+header */
-        do{
-            Rio_readlineb(&rio_h,header,MAXLINE);
-
-            /*INSERT INTO MERGED VERSION */
-            /* parse header for useful information */
-            parseHeaderType(header,headertype);
-            if(!strcmp(headertype,"Transfer-Encoding"))
-                sscanf(header, "%*s %s",option);{
-                    if(!strcmp(option,"chunked")){
-                        chunked=1;
-                        printf("Chunked TE option detected\n");
-                    }
-                }
-
-            printf("%s",header);
-            Rio_writen(fd,header, MAXLINE);
-        }while(strcmp(header,"\r\n"));
-        printf("end of server response header\n");
-
-        while(Rio_readlineb(&rio_h, buf, MAXLINE)){
-            printf("--->after second 'end of server response header'\n");
-            Rio_writen(fd, buf, MAXLINE);
-
+        if((len = rio_readnb(&rio_c,buf,MAXLINE))==0){
+            dbg_printf("client end closed socket\n");
         }
-        printf("\nstream ended\n");
-        Close(hostfd); /* disconnect from host */
-        printf("closed connection with host\n");
+        else
+            dbg_printf("client still connected\n");
+        Close(*(int *)clientfd);
+        Close(hostfd);
+        dbg_printf("disconnected from client and host\n");
+        free(clientfd);
+
     }
-    printf("%s\n",buf);
+
+    /* Code for Multiple Requests inside main method. */
+
+    sbuf_init(&sbuf, SBUFSIZE);
+    listenfd = Open_listenfd(port);
+
+    /* Create the worker threads. */
+    for(i = 0; i < NTHREADS; i++)
+    {
+        Pthread_create(&tid, NULL, thread, NULL);
+    }
+
+    while(1)
+    {
+        connfd = Accept(listenfd, (SA *) &clientaddr, &sockclientlen);
+        /* Insert connfd into the buffer. */
+        sbuf_insert(&sbuf, connfd);
+    }
+
+    /* END Code for Multiple Requests inside main method. */
+
 }
 
 /*
  * read_requesthdrs - read and parse HTTP request headers
  */
-void read_requesthdrs(rio_t *rp) 
+void read_requesthdrs(rio_t *rp, int hostfd) 
 {
     char buf[MAXLINE];
+    char type[MAXLINE];
+    char option[MAXLINE];
 
-    Rio_readlineb(rp, buf, MAXLINE);
-    printf("%s", buf);
-    while(strcmp(buf, "\r\n")) {
+    /* loop until the buf is just \r\n */
+    do{ 
+        bzero(buf, MAXLINE);
         Rio_readlineb(rp, buf, MAXLINE);
-        printf("%s", buf);
-    }
+        //printf("%s",buf);
+
+        bzero(type, MAXLINE);
+        bzero(option, MAXLINE);
+        parseHeaderType(buf,type);
+        if(!strcmp(type,"Proxy-Connection") || !strcmp(type,"Connection")){
+            sscanf(buf, "%*s %s",option);
+            /* forward connection option to server */
+            bzero(buf, MAXLINE);            
+            strcpy(buf, type);
+            strcat(buf, ": close\r\n");
+            Rio_writen(hostfd, buf, strlen(buf));
+            printf("%s", buf);
+        }
+        else if(!strcmp(type,"Cookie"))
+            ;// printf("NOTSENT: ");
+        else if(!strcmp(type, "User-Agent"))
+            ;// printf("NOTSENT: ");
+        else{ /* just send it */
+            Rio_writen(hostfd, buf, strlen(buf));
+            printf("%s", buf);
+        }
+    }while(strcmp(buf, "\r\n"));
     return;
 }
 
 
-/*
- * parse_uri - parse URI into filename and CGI args
- *             return 0 if dynamic content, 1 if static
- */
-int parse_uri(char *uri, char *filename, char *cgiargs) 
-{
-    char *ptr;
-
-    if (!strstr(uri, "cgi-bin")) {  /* Static content */
-        strcpy(cgiargs, "");
-        strcpy(filename, ".");
-        strcat(filename, uri);
-        if (uri[strlen(uri)-1] == '/')
-            strcat(filename, "home.html");
-        return 1;
-    }
-    else {  /* Dynamic content */
-        ptr = index(uri, '?');
-        if (ptr) {
-            strcpy(cgiargs, ptr+1);
-            *ptr = '\0';
-        }
-        else 
-            strcpy(cgiargs, "");
-        strcpy(filename, ".");
-        strcat(filename, uri);
-        return 0;
-    }
-}
-
-/*
- * get_filetype - derive file type from file name
- */
-void get_filetype(char *filename, char *filetype) 
-{
-    if (strstr(filename, ".html"))
-        strcpy(filetype, "text/html");
-    else if (strstr(filename, ".gif"))
-        strcpy(filetype, "image/gif");
-    else if (strstr(filename, ".jpg"))
-        strcpy(filetype, "image/jpeg");
-    else
-        strcpy(filetype, "text/plain");
-}  
-
 /* genrequest - compiles a HTTP request */
 void genrequest(char *request, char *method, char *uri, char *version){
     /* create request string */
-    strcpy(request,"GET");
-    if (uri[strlen(uri)-1] == '/')
-        strcat(uri, "index.html");
-    strcat(request," ");
-    strcat(request, uri);
-    strcat(request," ");
-    strcat(request, version);
-    strcat(request,"\r\n");
-    /* create request string */
+    bzero(request, MAXLINE);
     strcpy(request,method);
-    if (uri[strlen(uri)-1] == '/')
-        strcat(uri, "index.html");
     strcat(request," ");
     strcat(request, uri);
     strcat(request," ");
@@ -332,41 +234,55 @@ void genheader(char *host,char *header){
     strcat(header,"\r\n\r\n");
 }
 
-/*/////////// Added by Ben on 12/2/11*/
 
-/* Given a website, parses the url into its host and argument.
-
-Input: char* url (Contains the full URL.), char** host (Garbage.), char** uri (Garbage.)
-Output: char* url (Garbage.), char** host (Host name of the URL. ex: www.cmu.edu.), char** uri (Argument of the URL. Contains the remaining directory of the URL.)
-
-Requires string.h and stdio.h. strchr(s, c) finds the first occurence of char c i
-n string s.
-*/
-void parseURL(char* url, char* host, char* uri)
+/* parseURL - parses the url for hostname and uri
+ * Input: char* url (Contains URL)
+ * Output: char* host (Host name ex: www.cmu.edu.), 
+ *         char* uri (URI. Contains the directory/file name) 
+ */
+void getURI(char* url, char* uri)
 {
     int len = 0;
     int pos;
-    int offset = 0; /* http:// has a length of 7. We should really be looking for the first space, but this is still guaranteed to work because it will be the first instance of http */
+    int offset = 0; 
     char nohttp[MAXLINE];
-    //  char method[MAXLINE];
 
-    //sscanf(url, "%s %s %s", method, url, version);
+    /* len(http://) = 7 */
     offset = strcspn(url, "http://") + 7;
     len = strlen(url);
-    //printf("input -- url: %s\tmethod: %s\tversion: %s\n", url, method, version);
 
     /* Removes the http:// from an url. */
     strcpy(nohttp, url + offset);
-
-    //printf("string nohttp: %s\n", nohttp);
-
-    /* Searches for the url by looking for the first slash. */
+    /* Searches for the uri by looking for the first slash. */
     pos = strcspn(nohttp, "/");
-    strncpy(host, nohttp, pos);
     strncpy(uri, nohttp + pos, len - pos);
 
-    printf("output: url: %s\thost: %s\t uri: %s\n", url, host, uri);
-    //  printf("output: url: %s\thost: %s\t uri: %s\n", url, host, uri);
+    printf("EXTRACTED: uri: %s\n", uri);
+}
+
+int isURL(char *buf){   
+    if(!buf)
+        return -1;
+    if(strlen(buf)==strcspn(buf, "http://"))
+        return 0;
+    return 1;
+}
+
+void getHost(char *url, char *host){
+    int pos;
+    int offset = 0; 
+    char nohttp[MAXLINE];
+
+    /* len(http://) = 7 */
+    offset = strcspn(url, "http://") + 7;
+
+    /* Removes the http:// from an url. */
+    strcpy(nohttp, url + offset);
+    /* Searches for the uri by looking for the first slash. */
+    pos = strcspn(nohttp, "/");
+    strncpy(host, nohttp, pos);
+
+    printf("EXTRACTED: host: %s\n", host);
 }
 
 /* parseHeaderType - given a header line, this will 
@@ -381,46 +297,24 @@ void parseHeaderType(char* header, char* type){
     strncpy(type, header, pos); 
 }
 
-/* 
- * echoservert_pre.c - A prethreaded concurrent echo server
- */
-/* $begin echoservertpremain */
+void getVersion(char* buf, char* version)
+{
+    sscanf(buf, "%s %*s %*s", version);
+}
 
-void *thread(void *vargp) 
-{  
-    Pthread_detach(pthread_self()); 
-    while (1) { 
-        int connfd = sbuf_remove(&sbuf); /* Remove connfd from buffer */ //line:conc:pre:removeconnfd
-        echo_cnt(connfd);                /* Service client */
+
+/* Methods for Multiple Requests */
+void* thread(void* vargp)
+{
+    Pthread_detach(pthread_self());
+    while(1)
+    {
+        /* Remove connfd from the buffer. */
+        int connfd = sbuf_remove(&sbuf);
+        /* Service client. */
+        proc_request(connfd);
         Close(connfd);
     }
 }
-/* $end echoservertpremain */
 
-
-/* 
- * A thread-safe version of echo that counts the total number
- * of bytes received from clients.
- */
-/* $begin echo_cnt */
-void echo_cnt(int connfd)
-{
-    int n; 
-    char buf[MAXLINE]; 
-    rio_t rio;
-    static pthread_once_t once = PTHREAD_ONCE_INIT;
-
-    Pthread_once(&once, init_echo_cnt); //line:conc:pre:pthreadonce
-    Rio_readinitb(&rio, connfd);        //line:conc:pre:rioinitb
-    while((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
-        P(&mutex);
-        byte_cnt += n; //line:conc:pre:cntaccess1
-        printf("thread %d received %d (%d total) bytes on fd %d\n", 
-                (int) pthread_self(), n, byte_cnt, connfd); //line:conc:pre:cntaccess2
-        V(&mutex);
-        Rio_writen(connfd, buf, n);
-    }
-}
-
-/* $end echo_cnt */
-
+/* END Methods for Multiple Requests */
