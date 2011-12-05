@@ -1,6 +1,19 @@
 /*
  * ----------------------------------------------------------
- * proxy.c - A simple proxy server
+ * proxy.c - A simple proxy server that prespawns threads and
+ *           deploys request handler proc_request upon client 
+ *           request.
+ *
+ * Utilizes threading:
+ * 
+ * - spawns NTHREADS threads
+ * - threads block on sbufremove (in thread) until client's
+ *   connection request is processed and pushed into FIFO 
+ *   queue
+ * - mutex prevents multiple threads accessing same client
+ *   request
+ * 
+ *
  *
  * by: Benjamin Shih (bshih1) & Rentaro Matsukata (rmatsuka)
  * ----------------------------------------------------------
@@ -25,7 +38,7 @@
 #include "sbuf.h"
 
 /* Shared buffer size and number of threads. */
-#define NTHREADS 8
+#define NTHREADS 16
 #define SBUFSIZE 16
 #define MAX_VERSION 8
 
@@ -50,7 +63,6 @@ void* thread(void *vargp);
 
 /* Shared buffer for all of the connected descriptors */
 sbuf_t sbuf;
-
 
 /* 
  * MAIN CODE AREA 
@@ -111,28 +123,31 @@ void proc_request(void *arg){
     free(arg);
 
     printf("new connection fd: %d\n", clientfd);
-
-    Rio_readinitb(&rio_c, clientfd);
     //receive request
+    Rio_readinitb(&rio_c, clientfd);
     Rio_readlineb(&rio_c, buf, MAXLINE);
     dbg_printf("%sRECEIVED REQUEST\n",buf);
-
-    //setup host
     sscanf(buf, "%s %s %s", method, url, version);
-    if(isURL(url)==1){
-        getHost(url, host);
-        hostfd = Open_clientfd(host, PORT);
-        Rio_readinitb(&rio_h, hostfd);
-        dbg_printf("CONNECTED TO HOST\n");
-        getURI(url,uri);
+    
+    //setup host
+    getHost(url, host);
+    if((hostfd = open_clientfd(host, PORT)) < 0){
+	    /* if error: thread will stay alive and wait 
+	       for a connection request by a client*/
+	    fprintf(stderr, "ERROR: Could not Connect to Host\n");
+	    Close(clientfd);
+	    return; 
     }
-    else
-        strcpy(uri,url);
-    //transmit request
+    Rio_readinitb(&rio_h, hostfd);
+    dbg_printf("CONNECTED TO HOST\n");
+    getURI(url,uri);
+
+    //relay request to host
     genrequest(buf, method, uri, version);
-    Rio_writen(hostfd, buf, strlen(buf));
+    rio_writen(hostfd, buf, strlen(buf));
     dbg_printf("REQUEST SENT\n");
-    //loop headers
+
+    //loop through headers and relay them to host
     read_requesthdrs(&rio_c, hostfd);
     dbg_printf("HOST RESPONDING\n");
 
@@ -140,19 +155,18 @@ void proc_request(void *arg){
     do{
         Rio_readlineb(&rio_h,buf,MAXLINE);
         dbg_printf("%s", buf);
-        Rio_writen(clientfd,buf, strlen(buf));
+        rio_writen(clientfd,buf, strlen(buf));
     }while(strcmp(buf,"\r\n"));
+    
     //loop data
-
     while((len = rio_readnb(&rio_h,buf,MAXLINE))>0){
         dbg_printf("READ: %s", buf);
-        Rio_writen(clientfd, buf, len);
+        rio_writen(clientfd, buf, len);
     }
-    Rio_writen(clientfd, buf, len);         
+    rio_writen(clientfd, buf, len);         
     //printf("client: %d\n",clientconnected(&rio_c));
     Close(clientfd);
     Close(hostfd);
-    //dbg_printf("disconnected from client and host\n");
 }
 
 /*
@@ -166,8 +180,7 @@ void read_requesthdrs(rio_t *rp, int hostfd)
 
     /* loop until the buf is just \r\n */
     do{ 
-	    //        bzero(buf, MAXLINE);
-        Rio_readlineb(rp, buf, MAXLINE);
+	    Rio_readlineb(rp, buf, MAXLINE);
 
         parseHeaderType(buf,type);
         if(!strcmp(type,"Proxy-Connection") || !strcmp(type,"Connection")){
@@ -176,15 +189,11 @@ void read_requesthdrs(rio_t *rp, int hostfd)
             bzero(buf, MAXLINE);            
             strcpy(buf, type);
             strcat(buf, ": close\r\n");
-            Rio_writen(hostfd, buf, strlen(buf));
+            rio_writen(hostfd, buf, strlen(buf));
             dbg_printf("%s", buf);
         }
-        else if(!strcmp(type,"Cookie"))
-            ;// printf("NOTSENT: ");
-        else if(!strcmp(type, "User-Agent"))
-            ;// printf("NOTSENT: ");
         else{ /* just send it */
-            Rio_writen(hostfd, buf, strlen(buf));
+            rio_writen(hostfd, buf, strlen(buf));
             dbg_printf("%s", buf);
         }
     }while(strcmp(buf, "\r\n"));
@@ -195,7 +204,7 @@ void read_requesthdrs(rio_t *rp, int hostfd)
 /* genrequest - compiles a HTTP request */
 void genrequest(char *request, char *method, char *uri, char *version){
     /* create request string */
-    bzero(request, MAXLINE);
+    //bzero(request, MAXLINE);
     strcpy(request,method);
     strcat(request," ");
     strcat(request, uri);
