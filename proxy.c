@@ -64,9 +64,7 @@ int main(int argc, char **argv)
 	//while(1){
 	listenfd = Open_listenfd(port);
 	clientlen = sizeof(clientaddr); 
-	while(1){
-	
-			
+	while(1){	
 		clientfd = Malloc(sizeof(int));
 		*clientfd = Accept(listenfd,(SA *)&clientaddr,(socklen_t *)&clientlen);
 			
@@ -74,15 +72,15 @@ int main(int argc, char **argv)
 		
 		Rio_readinitb(&rio_c, *clientfd);
 		//receive request
-		bzero(buf,MAXLINE);
+		//bzero(buf,MAXLINE);
 		Rio_readlineb(&rio_c, buf, MAXLINE);
 		dbg_printf("%sRECEIVED REQUEST\n",buf);
-		bzero(method, MAXLINE);
-		bzero(url, MAXLINE);
-		bzero(version, MAX_VERSION);
+		//bzero(method, MAXLINE);
+		//bzero(url, MAXLINE);
+		//bzero(version, MAX_VERSION);
 					
 		//setup host
-		bzero(host,MAXLINE);
+		//bzero(host,MAXLINE);
 		sscanf(buf, "%s %s %s", method, url, version);
 		if(isURL(url)==1){
 			getHost(url, host);
