@@ -114,16 +114,24 @@ int main(int argc, char **argv)
 			dbg_printf("HOST HEADER TERMINATED\n");
 			//loop data
 			bzero(buf,MAXLINE);
-			while(Rio_readlineb(&rio_h,buf,MAXLINE)!=0){
+			/* modification */
+			while((len = rio_readnb(&rio_h,buf,MAXLINE))>0){
 				dbg_printf("READ: %s", buf);
 				Rio_writen(*((int *)clientfd), buf, strlen(buf));
 				bzero(buf,MAXLINE);
 			}
+			/* end modification */
+			/*
+			while(Rio_readlineb(&rio_h,buf,MAXLINE)!=0){
+				dbg_printf("READ: %s", buf);
+				Rio_writen(*((int *)clientfd), buf, strlen(buf));
+				bzero(buf,MAXLINE);
+				}*/
 			Close(*clientfd);
 			free(clientfd);
 		}while(persistence==1);
 		Close(hostfd);
-		Close(*clientfd);
+		//	Close(*clientfd);
 	}
 }
 
