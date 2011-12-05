@@ -25,13 +25,13 @@
 #define MAX_VERSION 8
 
 /* FUNCTION PROTOTYPES */
-void doit(int fd);
 void read_requesthdrs(rio_t *rp, int hostfd);
 void clienterror(int fd, char *cause, char *errnum, 
                  char *shortmsg, char *longmsg);
 
 int isURL(char *buf);
 
+void proc_request(void *arg);
 void genheader(char *host, char *header); 
 void genrequest(char *request, char *method, char *uri, char *version); 
 void getHost(char *url, char *host);
@@ -42,18 +42,9 @@ void parseHeaderType(char* header, char* type);
  */
 int main(int argc, char **argv) 
 {
-	int listenfd, hostfd, port, clientlen;
+	int port, clientlen, listenfd;
 	int *clientfd;
-	int len;
 	struct sockaddr_in clientaddr;
-
-	/* variables that may possibly move */
-	char buf[MAXLINE], url[MAXLINE], host[MAXLINE], uri[MAXLINE];
-	char method[MAXLINE], version[MAX_VERSION];
-	rio_t rio_c, rio_h;
-	/* end vars */
-
-
 	/* Check command line args */
 	if (argc != 2) {
 		fprintf(stderr, "usage: %s <port>\n", argv[0]);
@@ -61,74 +52,75 @@ int main(int argc, char **argv)
 	}
 	port = atoi(argv[1]);
 	
-	//while(1){
-	listenfd = Open_listenfd(port);
-	clientlen = sizeof(clientaddr); 
+	listenfd = Open_listenfd(port); 
+	clientlen = sizeof(clientaddr);
+
 	while(1){
-	
-			
 		clientfd = Malloc(sizeof(int));
 		*clientfd = Accept(listenfd,(SA *)&clientaddr,(socklen_t *)&clientlen);
-			
-		printf("new connection fd: %d\n", *(int *)clientfd);
-		
-		Rio_readinitb(&rio_c, *clientfd);
-		//receive request
-		bzero(buf,MAXLINE);
-		Rio_readlineb(&rio_c, buf, MAXLINE);
-		dbg_printf("%sRECEIVED REQUEST\n",buf);
-		bzero(method, MAXLINE);
-		bzero(url, MAXLINE);
-		bzero(version, MAX_VERSION);
-					
-		//setup host
-		bzero(host,MAXLINE);
-		sscanf(buf, "%s %s %s", method, url, version);
-		if(isURL(url)==1){
-			getHost(url, host);
-			hostfd = Open_clientfd(host, PORT);
-			Rio_readinitb(&rio_h, hostfd);
-			dbg_printf("CONNECTED TO HOST\n");
-			getURI(url,uri);
-		}
-		else
-			strcpy(uri,url);
-		//transmit request
-		bzero(buf, MAXLINE);
-		genrequest(buf, method, uri, version);
-		Rio_writen(hostfd, buf, strlen(buf));
-		dbg_printf("REQUEST SENT\n");
-		//loop headers
-		read_requesthdrs(&rio_c, hostfd);
-		dbg_printf("CLIENT TRANSMISSION TERMINATED\n");
-			
-		//parse response and header
-		do{
-			Rio_readlineb(&rio_h,buf,MAXLINE);
-			dbg_printf("%s", buf);
-			Rio_writen(*((int *)clientfd),buf, strlen(buf));
-		}while(strcmp(buf,"\r\n"));
-		dbg_printf("HOST HEADER TERMINATED\n");
-		//loop data
-		bzero(buf,MAXLINE);
-			
-		while((len = rio_readnb(&rio_h,buf,MAXLINE))>0){
-			dbg_printf("READ: %s", buf);
-			Rio_writen(*((int *)clientfd), buf, len);
-		}
-		Rio_writen(*((int *)clientfd), buf, len);			
-
-		if((len = rio_readnb(&rio_c,buf,MAXLINE))==0){
-			dbg_printf("client end closed socket\n");
-		}
-		else
-			dbg_printf("client still connected\n");
-		Close(*(int *)clientfd);
-		Close(hostfd);
-		dbg_printf("disconnected from client and host\n");
-		free(clientfd);
-
+		proc_request((void *)clientfd);
 	}
+}
+
+void proc_request(void *arg){
+	int hostfd, clientfd, len;
+	char buf[MAXLINE], url[MAXLINE], host[MAXLINE], uri[MAXLINE];
+	char method[MAXLINE], version[MAX_VERSION];
+	rio_t rio_c, rio_h;
+
+	clientfd = *(int *)arg;
+	free(arg);
+
+	printf("new connection fd: %d\n", clientfd);
+		
+	Rio_readinitb(&rio_c, clientfd);
+	//receive request
+	Rio_readlineb(&rio_c, buf, MAXLINE);
+	dbg_printf("%sRECEIVED REQUEST\n",buf);
+					
+	//setup host
+	bzero(host,MAXLINE);
+	sscanf(buf, "%s %s %s", method, url, version);
+	if(isURL(url)==1){
+		getHost(url, host);
+		hostfd = Open_clientfd(host, PORT);
+		Rio_readinitb(&rio_h, hostfd);
+		dbg_printf("CONNECTED TO HOST\n");
+		getURI(url,uri);
+	}
+	else
+		strcpy(uri,url);
+	//transmit request
+	genrequest(buf, method, uri, version);
+	Rio_writen(hostfd, buf, strlen(buf));
+	dbg_printf("REQUEST SENT\n");
+	//loop headers
+	read_requesthdrs(&rio_c, hostfd);
+	dbg_printf("CLIENT TRANSMISSION TERMINATED\n");
+			
+	//parse response and header
+	do{
+		Rio_readlineb(&rio_h,buf,MAXLINE);
+		dbg_printf("%s", buf);
+		Rio_writen(clientfd,buf, strlen(buf));
+	}while(strcmp(buf,"\r\n"));
+	dbg_printf("HOST HEADER TERMINATED\n");
+	//loop data
+			
+	while((len = rio_readnb(&rio_h,buf,MAXLINE))>0){
+		dbg_printf("READ: %s", buf);
+		Rio_writen(clientfd, buf, len);
+	}
+	Rio_writen(clientfd, buf, len);			
+
+	if((len = rio_readnb(&rio_c,buf,MAXLINE))==0){
+		dbg_printf("client end closed socket\n");
+	}
+	else
+		dbg_printf("client still connected\n");
+	Close(clientfd);
+	Close(hostfd);
+	dbg_printf("disconnected from client and host\n");
 }
 
 /*
