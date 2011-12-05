@@ -32,7 +32,7 @@
 #define MAX_VERSION 8
 
 /* FUNCTION PROTOTYPES */
-void proq_request(int fd);
+void proc_request(int fd);
 void read_requesthdrs(rio_t *rp, int hostfd);
 void clienterror(int fd, char *cause, char *errnum, 
         char *shortmsg, char *longmsg);
