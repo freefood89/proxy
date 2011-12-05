@@ -46,9 +46,9 @@ int main(int argc, char **argv)
 	struct sockaddr_in clientaddr;
 
 	/* variables that may possibly move */
-	int persistence=0;
+	int host_persist=0;
 	char buf[MAXLINE], url[MAXLINE], host[MAXLINE], uri[MAXLINE];
-	char method[MAXLINE], version[MAX_VERSION];
+	char method[MAXLINE], version[MAX_VERSION], response[MAXLINE], result[MAXLINE];
 	rio_t rio_c, rio_h;
 	/* end vars */
 
@@ -65,7 +65,7 @@ int main(int argc, char **argv)
 	clientlen = sizeof(clientaddr); 
 	while(1){
 		do{ 
-			printf("persistence: %d\n",persistence);
+			printf("host-proxy persistence: %d\n",host_persist);
 		  
 			clientfd = Malloc(sizeof(int));
 			*clientfd = Accept(listenfd,(SA *)&clientaddr,(socklen_t *)&clientlen);
@@ -75,12 +75,12 @@ int main(int argc, char **argv)
 			//receive request
 			bzero(buf,MAXLINE);
 			Rio_readlineb(&rio_c, buf, MAXLINE);
-			printf("RECEIVED REQUEST\n");
+			printf("%sRECEIVED REQUEST\n",buf);
 			bzero(method, MAXLINE);
 			bzero(url, MAXLINE);
 			bzero(version, MAX_VERSION);
 					
-			if(!persistence){
+			if(!host_persist){
 				//setup host
 				bzero(host,MAXLINE);
 				sscanf(buf, "%s %s %s", method, url, version);
@@ -91,7 +91,6 @@ int main(int argc, char **argv)
 				dbg_printf("CONNECTED TO HOST\n");
 				
 				getURI(url, uri);
-				//parseURL(url, host, uri); 
 			}			
 			else //host is already connected
 				sscanf(buf, "%s %s %s", method, uri, version);
@@ -102,31 +101,52 @@ int main(int argc, char **argv)
 			Rio_writen(hostfd, buf, strlen(buf));
 			dbg_printf("REQUEST SENT\n");
 			//loop headers
-			read_requesthdrs(&rio_c, hostfd, &persistence);
+			read_requesthdrs(&rio_c, hostfd, &host_persist);
 			dbg_printf("CLIENT TRANSMISSION TERMINATED\n");
 			
-			//parse response and header
+			//parse response
+			Rio_readlineb(&rio_h,buf,MAXLINE);
+			sscanf(buf,"%s %s %s",version,response,result);
+			if(!strcmp(version,"HTTP/1.0")){
+				printf("server runs %s\n",version);
+				host_persist=0;
+			}
+			/*	strcpy(version, "HTTP/1.1");
+			strcat(version, " ");
+			strcat(version, response);
+			strcat(version, " ");
+			strcat(version, result);
+			strcpy(buf, version);
+			strcat(buf, "\r\n");*/
+			printf("%s",buf);
+			Rio_writen(*((int *)clientfd), buf, strlen(buf));
+			//parse header
 			do{
-				bzero(buf, MAXLINE);
 				Rio_readlineb(&rio_h,buf,MAXLINE);
 				dbg_printf("%s", buf);
-				Rio_writen(*((int *)clientfd),buf, MAXLINE);
+				Rio_writen(*((int *)clientfd),buf, strlen(buf));
 			}while(strcmp(buf,"\r\n"));
 			dbg_printf("HOST HEADER TERMINATED\n");
 			//loop data
 			bzero(buf,MAXLINE);
+			
 			while((len = rio_readnb(&rio_h,buf,MAXLINE))>0){
 				dbg_printf("READ: %s", buf);
 				Rio_writen(*((int *)clientfd), buf, strlen(buf));
 			}
 			Rio_writen(*((int *)clientfd), buf, strlen(buf));			
-			if(rio_readlineb(&rio_c,buf,strlen(buf) == 0)){
-				printf("client has closed connection\n");
+
+			if((len = rio_readnb(&rio_c,buf,MAXLINE))==0){
+				printf("client end closed socket\n");
 				Close(*(int *)clientfd);
+				printf("disconnect from client");
 				free(clientfd);
 			}
-		}while(persistence==1);
-		Close(hostfd);
+			/* if host closes after every transaction */
+			if(!host_persist)
+				Close(hostfd);
+		}while(host_persist!=-1);
+		//Close(hostfd);
 		//	Close(*clientfd);
 	}
 }
@@ -250,3 +270,7 @@ void parseHeaderType(char* header, char* type){
 	strncpy(type, header, pos); 
 }
 
+void getVersion(char* buf, char* version)
+{
+	sscanf(buf, "%s %*s %*s", version);
+}
