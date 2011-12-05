@@ -76,7 +76,7 @@ int main(int argc, char **argv)
 		//receive request
 		bzero(buf,MAXLINE);
 		Rio_readlineb(&rio_c, buf, MAXLINE);
-		printf("%sRECEIVED REQUEST\n",buf);
+		dbg_printf("%sRECEIVED REQUEST\n",buf);
 		bzero(method, MAXLINE);
 		bzero(url, MAXLINE);
 		bzero(version, MAX_VERSION);
@@ -119,13 +119,13 @@ int main(int argc, char **argv)
 		Rio_writen(*((int *)clientfd), buf, len);			
 
 		if((len = rio_readnb(&rio_c,buf,MAXLINE))==0){
-			printf("client end closed socket\n");
+			dbg_printf("client end closed socket\n");
 		}
 		else
-			printf("client still connected\n");
+			dbg_printf("client still connected\n");
 		Close(*(int *)clientfd);
 		Close(hostfd);
-		printf("disconnected from client and host\n");
+		dbg_printf("disconnected from client and host\n");
 		free(clientfd);
 
 	}
