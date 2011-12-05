@@ -35,6 +35,7 @@ void sbuf_insert(sbuf_t *sp, int item)
 }
 /* $end sbuf_insert */
 
+
 /* Remove and return the first item from buffer sp */
 /* $begin sbuf_remove */
 int sbuf_remove(sbuf_t *sp)

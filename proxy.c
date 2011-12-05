@@ -28,7 +28,6 @@
 #define NTHREADS 8
 #define SBUFSIZE 16
 
-
 #define MAX_VERSION 8
 
 /* FUNCTION PROTOTYPES */
