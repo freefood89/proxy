@@ -4,16 +4,19 @@ LDFLAGS = -lpthread
 
 all: proxy
 
+sbuf.o: sbuf.c sbuf.h
+	$(CC) $(CFLAGS) -c sbuf.c
+
 csapp.o: csapp.c csapp.h
 	$(CC) $(CFLAGS) -c csapp.c
 
 proxy.o: proxy.c csapp.h
 	$(CC) $(CFLAGS) -c proxy.c
 
+proxy: proxy.o csapp.o
+
 client.o: client.c csapp.h
 	$(CC) $(CFLAGS) -c client.c
-
-proxy: proxy.o csapp.o
 
 client: client.o csapp.o
 
