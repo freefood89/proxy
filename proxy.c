@@ -10,7 +10,7 @@
 #define DEBUG
 #define PORT 80
 #define TRUE 1
-#define FLASE 0
+#define FALSE 0
 
 #ifdef DEBUG
 #define dbg_printf(...) printf(__VA_ARGS__)
