@@ -8,7 +8,7 @@
 
 #define _GNU_SOURCE
 #define DEBUG
-#define PORT 53392
+#define PORT 80
 #define TRUE 1
 #define FLASE 0
 
@@ -114,9 +114,9 @@ int main(int argc, char **argv)
 			
 		while((len = rio_readnb(&rio_h,buf,MAXLINE))>0){
 			dbg_printf("READ: %s", buf);
-			Rio_writen(*((int *)clientfd), buf, strlen(buf));
+			Rio_writen(*((int *)clientfd), buf, len);
 		}
-		Rio_writen(*((int *)clientfd), buf, strlen(buf));			
+		Rio_writen(*((int *)clientfd), buf, len);			
 
 		if((len = rio_readnb(&rio_c,buf,MAXLINE))==0){
 			printf("client end closed socket\n");
