@@ -5,7 +5,6 @@
  * by: Benjamin Shih (bshih1) & Rentaro Matsukata (rmatsuka)
  * ----------------------------------------------------------
  */
-
 #define _GNU_SOURCE
 #define DEBUG
 #define PORT 80
