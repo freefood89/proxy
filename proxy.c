@@ -13,7 +13,7 @@
  * - mutex prevents multiple threads accessing same client
  *   request
  * 
- *
+ * Supports Caching:
  *
  * by: Benjamin Shih (bshih1) & Rentaro Matsukata (rmatsuka)
  * ----------------------------------------------------------
@@ -24,6 +24,9 @@
 #define PORT 80
 #define TRUE 1
 #define FALSE 0
+#define MAX_OBJ 102400 
+#define MAX_CACHE 1048576
+
 
 #ifdef DEBUG
 #define dbg_printf(...) printf(__VA_ARGS__)
@@ -37,6 +40,22 @@
 #include "csapp.h"
 #include "sbuf.h"
 
+typedef struct cacheNode {
+	char *content;
+	char *uri;
+	long size;
+	//time_t timestamp;
+	struct cacheNode *prev;
+	struct cacheNode *next;
+} cacheNode;
+
+typedef struct cache {
+	struct cacheNode *head;
+	struct cacheNode *tail; // to speed up eviction
+	pthread_rwlock_t lock;
+	int size;
+} cache;
+
 /* Shared buffer size and number of threads. */
 #define NTHREADS 16
 #define SBUFSIZE 16
@@ -44,11 +63,7 @@
 
 /* FUNCTION PROTOTYPES */
 void read_requesthdrs(rio_t *rp, int hostfd);
-void clienterror(int fd, char *cause, char *errnum, 
-        char *shortmsg, char *longmsg);
-
 int isURL(char *buf);
-
 void proc_request(void *arg);
 void genheader(char *host, char *header); 
 void genrequest(char *request, char *method, char *uri, char *version); 
@@ -57,13 +72,25 @@ void getURI(char *url, char *uri);
 void parseHeaderType(char* header, char* type);
 int clientconnected(rio_t *rio_c);
 
-/* Function Prototypes for Multiple Requests */
+/* function prototypes for threading */
 void echo_cnt(int connfd);
 void* thread(void *vargp);
+/* for threading and caching */
+void lockW(void); 
+void lockR(void); 
+void unlock(void); 
+/* function prototypes for caching */
+long cacheVacancy(void);  
+void initCache(void); 
+void cacheContent(char *content, char *uri, size_t size); 
+int serveCached(int client_fd, char *uri);
+void evictCached(void); 
+struct cacheNode *getCached(char *uri); 
 
 /* Shared buffer for all of the connected descriptors */
 sbuf_t sbuf;
-
+/* Shared cache for all of the threads */
+cache *mycache;
 /* 
  * MAIN CODE AREA 
  */
@@ -284,6 +311,21 @@ void parseHeaderType(char* header, char* type){
     strncpy(type, header, pos); 
 }
 
+int clientconnected(rio_t *rio_c){
+	int len;
+	char buf[MAXLINE];
+	if((len = rio_readnb(rio_c,buf,MAXLINE))==0){
+		//dbg_printf("client end closed socket\n");
+        return 0;
+	}
+	else{
+	    //dbg_printf("client still connected\n");*/
+		return 1;
+	}
+}
+
+/* Code for threading */
+
 void* thread(void* vargp)
 {
     int* clientfd;
@@ -301,15 +343,175 @@ void* thread(void* vargp)
     }
 }
 
-int clientconnected(rio_t *rio_c){
-	int len;
-	char buf[MAXLINE];
-	if((len = rio_readnb(rio_c,buf,MAXLINE))==0){
-		//dbg_printf("client end closed socket\n");
-        return 0;
+/* ------Code for caching and threading---------------------- 
+ *
+ * lockCacheW & lockCacheR:
+ * - prepares the cache for reading & writing respectively
+ * - locked items cannot be accessed by 
+ * - neccessary to prevent threads from accessing the same
+ *   node 'simultaneously'
+ * - both block threads so threads can 'queue' (no order)
+ *   to access item 
+ */
+void lockCacheW() {
+	if(pthread_rwlock_wrlock((pthread_rwlock_t *)&(mycache->lock))) {
+		fprintf(stderr, "Error during Cache Write Lock\n");
+		exit(-1);
 	}
-	else{
-	    //dbg_printf("client still connected\n");*/
-		return 1;
+}
+void lockCacheR() {
+	if(pthread_rwlock_rdlock((pthread_rwlock_t *)&(mycache->lock))) {
+		fprintf(stderr, "Error during Cache Read Lock\n");
+		exit(-1);
 	}
+}
+
+/* unlockCache -  unlocks the previously locked cache */
+void unlockCache() {
+	if(pthread_rwlock_unlock((pthread_rwlock_t *)&(mycache->lock))) {
+		fprintf(stderr, "Error during Cache Unlock\n");
+		exit(-1);
+	}
+}
+
+/* -------------Code for Caching------------------*/
+
+long cacheVacancy(){
+	long remaining = MAX_CACHE;
+
+	lockCacheR();		
+	remaining -= mycache->size;
+	unlockCache();
+		
+	return remaining;
+}
+
+/* initCache - allocates and creates a cache at mycache
+ * mostly administrative stuff
+ */
+void initCache() {
+	mycache = Calloc(1, sizeof(cache));
+	mycache->head = NULL;
+	mycache->size = 0;
+	/* this is necessary to enable locking */
+	if(pthread_rwlock_init(&(mycache->lock), NULL)) {
+		fprintf(stderr, "Cache initialization failed\n");
+	}
+}
+
+void cacheContent(char *content, char *uri, size_t size){
+	cacheNode *target;
+
+	/* Have to include uri in size */
+	size_t total_size = size + strlen(uri) + 1;
+
+	/* Evict until we have space to fit content */
+	while(total_size < cacheVacancy()) {
+		evictCached();
+	}
+
+	lockCacheW();
+	/* Allocate memory for content  */
+	target = Calloc(1, sizeof(struct cacheNode));
+	target->uri = Malloc(strlen(uri) + 1);
+	strcpy(target->uri, uri);
+	target->content = Malloc(size);
+	memcpy(target->content, content, size);
+	target->size = total_size;
+
+	/* Set new content as head */
+	if(mycache->head != NULL) {
+		target->next = mycache->head;
+		mycache->head->prev = target;
+		mycache->head = target;
+		target->prev = NULL;
+		/* set up tail for fresh cache */
+		if(!mycache->tail) mycache->tail = target;
+	} 
+	else
+		mycache->head = target;
+	mycache->size += total_size;
+	unlockCache();
+}
+ 
+/* serveCached - serves cached content to client
+ * 
+ * returns 1  upon successful transmit
+ * returns -1 upon write failure
+ */
+int serveCached(int clientfd, char *uri){
+	char *content;
+	size_t size;
+	cacheNode *target = getCached(uri);
+
+	/*Update timestamp*/
+	lockCacheW();
+	//target->timestamp = time(NULL);
+	unlockCache();
+	
+	content = target->content;
+	size = target->size;
+
+	lockCacheR();
+	/* serve content to client */
+	if(rio_writen(clientfd, content, size) < 0) {
+		unlockCache();
+		free(uri);
+		Close(clientfd);
+		return -1;
+	}
+	unlockCache();
+	return 1;
+}
+
+/* evictCached - evicts cached least recently used content */
+void evictCached() {
+	cacheNode *oldest = mycache->tail;
+	
+	lockCacheW();
+
+	/* nothing to evict */
+	if(!mycache->tail) return;
+	if(oldest->next != NULL){
+		fprintf(stderr, "Mismanaged Tail");
+		return;
+	}
+	
+	if(!oldest->prev){ 
+		/*if tail is also head cache is empty*/
+		mycache->head = NULL;
+		mycache->tail = NULL;
+	}
+	else{ 
+		/* set new tail */
+		mycache->tail = oldest->prev;
+		/* tail has no next */
+		mycache->tail->next = NULL;
+	}
+		
+	/* Update cache size */
+	mycache->size -= oldest->size;
+	free(oldest->uri);
+	free(oldest);
+	unlockCache();
+}
+ 
+struct cacheNode *getCached(char *uri){
+	cacheNode *target = mycache->head;
+
+	/* block here. can't let others edit during search */
+	lockCacheR();
+
+	if(!target) return NULL;
+	while(target){
+		/* return cache ptr if match */
+		if(!strcmp(uri, target->uri)) {
+			unlockCache();
+			return target;
+		}
+		target = target->next;
+	}
+	unlockCache();
+	/* item not in cache */
+	return NULL;
 }
