@@ -15,6 +15,10 @@
  * 
  * Supports Caching:
  *
+ * - caches items that are smaller than MAXOBJ
+ * - if cache is full it uses LRU to evict the oldest item
+ * - the cache has maximum capacity MAXCACHE
+ * 
  * by: Benjamin Shih (bshih1) & Rentaro Matsukata (rmatsuka)
  * ----------------------------------------------------------
  */
@@ -303,8 +307,6 @@ void procRequest(int connfd){
 	host[0] = '\0';
 
 	if (0 < n && 0 != strcmp("\r\n", req)){
-		printf("%s", req);
-
 		/* Parse the method, uri, and version into their own separate variables. */
 		if (3 != sscanf(req, "%s %s %s", method, uri, version)){
 			fprintf(stderr, "Error parsing GET instruction.\n");
@@ -346,19 +348,19 @@ void procRequest(int connfd){
 				pthread_mutex_lock(&cache[cacheIndex].mutex);
 				cache[cacheIndex].LRUstamp = timeStamp++;
 				pthread_mutex_unlock(&cache[cacheIndex].mutex);
-				printf("Cache hit. Reading from cache.\n");
+				dbg_printf("Cache hit. Reading from cache.\n");
 			} 
             else{
 				if (0 != numPort && NULL != filePath && NULL != host){
 					genRequest(connfd, &browserio, uri, host, filePath, numPort);
-					printf("Cache miss. Reading from server.\n");
+					dbg_printf("Cache miss. Reading from server.\n");
 				} 
 				else{
 					fprintf(stderr, "Error during url parsing.\n");
 				}	
 			}
 		}
-		printf("Request successfully processed.\n");
+		dbg_printf("Request successfully processed.\n");
 	}
 }
 
@@ -368,7 +370,7 @@ void *thread(void *vargp){
     
 	Pthread_detach(pthread_self());
     procRequest(connfd);
-    printf("Closing connection.\n\n");
+    dbg_printf("Closing connection.\n\n");
     close(connfd);
     free(vargp);
     
@@ -380,7 +382,7 @@ void cacheAlloc(int cacheIndex, char *content, char *url, size_t size){
 	strcpy(cache[cacheIndex].url, url);
 	cache[cacheIndex].data = malloc(size);
 	if(!cache[cacheIndex].data){
-		printf("Error allocating memory for the data. Malloc unsuccessful.\n");
+		dbg_printf("Error allocating memory for the data. Malloc unsuccessful.\n");
 		return;
 	}
 
