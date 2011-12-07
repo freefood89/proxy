@@ -20,13 +20,12 @@
  */
 
 #define _GNU_SOURCE
-//#define DEBUG
 #define PORT 80
 #define TRUE 1
 #define FALSE 0
-#define MAX_OBJ 102400 
-#define MAX_CACHE 1048576
-
+#define NUMLINES 100
+#define MAXCACHE 1048576
+#define MAXOBJ 102400
 
 #ifdef DEBUG
 #define dbg_printf(...) printf(__VA_ARGS__)
@@ -38,480 +37,359 @@
 #include <stdlib.h>
 #include <string.h>
 #include "csapp.h"
-#include "sbuf.h"
 
-typedef struct cacheNode {
-	char *content;
-	char *uri;
-	long size;
-	//time_t timestamp;
-	struct cacheNode *prev;
-	struct cacheNode *next;
-} cacheNode;
-
-typedef struct cache {
-	struct cacheNode *head;
-	struct cacheNode *tail; // to speed up eviction
-	pthread_rwlock_t lock;
+typedef struct cacheLine{
+	pthread_mutex_t mutex;
 	int size;
-} cache;
-
-/* Shared buffer size and number of threads. */
-#define NTHREADS 16
-#define SBUFSIZE 16
-#define MAX_VERSION 8
+	int LRUstamp;
+	char *data;
+	char url[MAXLINE];
+} cacheLine;
 
 /* FUNCTION PROTOTYPES */
-void read_requesthdrs(rio_t *rp, int hostfd);
-int isURL(char *buf);
-void proc_request(void *arg);
-void genheader(char *host, char *header); 
-void genrequest(char *request, char *method, char *uri, char *version); 
-void getHost(char *url, char *host);
-void getURI(char *url, char *uri);
-void parseHeaderType(char* header, char* type);
-int clientconnected(rio_t *rio_c);
+void lockCacheW();
+void lockCacheR();
+void unlockCache();
+int  cacheCheck(char *url);
+int  cacheVacancy();
+int  leastRecentlyUsed();
+void cacheLineFree(int cacheIndex);
+void *thread(void *vargp);
+void cacheAlloc(int cacheIndex, char *content, char *url, size_t size);
+void procRequest(int connfd);
+void genRequest(int connfd, rio_t *browserio, char *uri, char* host, char* filePath, int numPort);
+void initCache();
 
-/* function prototypes for threading */
-void echo_cnt(int connfd);
-void* thread(void *vargp);
-/* for threading and caching */
-void lockW(void); 
-void lockR(void); 
-void unlock(void); 
-/* function prototypes for caching */
-long cacheVacancy(void);  
-void initCache(void); 
-void cacheContent(char *content, char *uri, size_t size); 
-int serveCached(int client_fd, char *uri);
-void evictCached(void); 
-struct cacheNode *getCached(char *uri); 
+cacheLine cache[NUMLINES];
+int overallCacheSize = 0;
+int occupiedCacheLines = 0;
+pthread_rwlock_t cacheLock;
+pthread_mutex_t openLock;
+int timeStamp = 1;
+int port;
 
-/* Shared buffer for all of the connected descriptors */
-sbuf_t sbuf;
-/* Shared cache for all of the threads */
-cache *mycache;
-/* 
- * MAIN CODE AREA 
- */
-int main(int argc, char **argv) 
+int main(int argc, char *argv [])
 {
-    /* Variables for Multiple Requests */
-    int i,  connfd;
-    socklen_t  sockclientlen = sizeof(struct sockaddr_in);
-    pthread_t tid;
+	int *connfd, listenfd;
+	struct sockaddr_in addr;
+	unsigned int len;
 
-    /* END Variables for Multiple Requests */
-
-    int port, clientlen, listenfd;
-    //int *clientfd;
-    struct sockaddr_in clientaddr;
-    /* Check command line args */
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s <port>\n", argv[0]);
-        exit(1);
-    }
-
-    signal(SIGPIPE, SIG_IGN);
-
-
-    port = atoi(argv[1]);
-
-    listenfd = Open_listenfd(port); 
-    clientlen = sizeof(clientaddr);
-
-    /* Code for Multiple Requests inside main method. */
-    sbuf_init(&sbuf, SBUFSIZE);
-    /* Create the worker threads. */
-    for(i = 0; i < NTHREADS; i++)
-    {
-        Pthread_create(&tid, NULL, thread, NULL);
-    }
-
-    while(1)
-    {
-        connfd = Accept(listenfd, (SA *) &clientaddr, &sockclientlen);
-        //        printf("client queued.\n");
-        /* Insert connfd into the buffer. */
-        sbuf_insert(&sbuf, connfd);
-    }
-
-    /* END Code for Multiple Requests inside main method. */
-    return 0;
-}
-
-void proc_request(void *arg){
-    int hostfd, clientfd, len;
-    char buf[MAXLINE], url[MAXLINE], host[MAXLINE], uri[MAXLINE];
-    char method[MAXLINE], version[MAX_VERSION];
-    rio_t rio_c, rio_h;
-
-    clientfd = *(int *)arg;
-    free(arg);
-
-    printf("new connection fd: %d\n", clientfd);
-    //receive request
-    Rio_readinitb(&rio_c, clientfd);
-    Rio_readlineb(&rio_c, buf, MAXLINE);
-    dbg_printf("%sRECEIVED REQUEST\n",buf);
-    sscanf(buf, "%s %s %s", method, url, version);
-    
-    //setup host
-    getHost(url, host);
-    if((hostfd = open_clientfd(host, PORT)) < 0){
-	    /* if error: thread will stay alive and wait 
-	       for a connection request by a client*/
-	    fprintf(stderr, "ERROR: Could not Connect to Host\n");
-	    Close(clientfd);
-	    return; 
-    }
-    Rio_readinitb(&rio_h, hostfd);
-    dbg_printf("CONNECTED TO HOST\n");
-    getURI(url,uri);
-
-    //relay request to host
-    genrequest(buf, method, uri, version);
-    rio_writen(hostfd, buf, strlen(buf));
-    dbg_printf("REQUEST SENT\n");
-
-    //loop through headers and relay them to host
-    read_requesthdrs(&rio_c, hostfd);
-    dbg_printf("HOST RESPONDING\n");
-
-    //parse response and header
-    do{
-        Rio_readlineb(&rio_h,buf,MAXLINE);
-        dbg_printf("%s", buf);
-        rio_writen(clientfd,buf, strlen(buf));
-    }while(strcmp(buf,"\r\n"));
-    
-    //loop data
-    while((len = rio_readnb(&rio_h,buf,MAXLINE))>0){
-        dbg_printf("READ: %s", buf);
-        rio_writen(clientfd, buf, len);
-    }
-    rio_writen(clientfd, buf, len);         
-    //printf("client: %d\n",clientconnected(&rio_c));
-    Close(clientfd);
-    Close(hostfd);
-}
-
-/*
- * read_requesthdrs - read and parse HTTP request headers
- */
-void read_requesthdrs(rio_t *rp, int hostfd) 
-{
-    char buf[MAXLINE];
-    char type[MAXLINE];
-    char option[MAXLINE];
-
-    /* loop until the buf is just \r\n */
-    do{ 
-	    Rio_readlineb(rp, buf, MAXLINE);
-
-        parseHeaderType(buf,type);
-        if(!strcmp(type,"Proxy-Connection") || !strcmp(type,"Connection")){
-            sscanf(buf, "%*s %s",option);
-            /* forward connection option to server */
-            bzero(buf, MAXLINE);            
-            strcpy(buf, type);
-            strcat(buf, ": close\r\n");
-            rio_writen(hostfd, buf, strlen(buf));
-            dbg_printf("%s", buf);
-        }
-        else{ /* just send it */
-            rio_writen(hostfd, buf, strlen(buf));
-            dbg_printf("%s", buf);
-        }
-    }while(strcmp(buf, "\r\n"));
-    return;
-}
-
-
-/* genrequest - compiles a HTTP request */
-void genrequest(char *request, char *method, char *uri, char *version){
-    /* create request string */
-    //bzero(request, MAXLINE);
-    strcpy(request,method);
-    strcat(request," ");
-    strcat(request, uri);
-    strcat(request," ");
-    strcat(request, version);
-    strcat(request,"\r\n");
-}
-
-/* genheader - generates a HTTP request header */
-void genheader(char *host,char *header){
-    strcpy(header,"Host: ");
-    strcat(header,host);
-    strcat(header,"\r\n\r\n");
-}
-
-
-/* parseURL - parses the url for hostname and uri
- * Input: char* url (Contains URL)
- * Output: char* host (Host name ex: www.cmu.edu.), 
- *         char* uri (URI. Contains the directory/file name) 
- */
-void getURI(char* url, char* uri)
-{
-    int len = 0;
-    int pos;
-    int offset = 0; 
-    char nohttp[MAXLINE];
-
-    /* len(http://) = 7 */
-    offset = strcspn(url, "http://") + 7;
-    len = strlen(url);
-
-    /* Removes the http:// from an url. */
-    strcpy(nohttp, url + offset);
-    /* Searches for the uri by looking for the first slash. */
-    pos = strcspn(nohttp, "/");
-    strncpy(uri, nohttp + pos, len - pos);
-
-    dbg_printf("EXTRACTED: uri: %s\n", uri);
-}
-
-int isURL(char *buf){   
-    if(!buf)
-        return -1;
-    if(strlen(buf)==strcspn(buf, "http://"))
-        return 0;
-    return 1;
-}
-
-void getHost(char *url, char *host){
-    int pos;
-    int offset = 0; 
-    char nohttp[MAXLINE];
-
-    /* len(http://) = 7 */
-    offset = strcspn(url, "http://") + 7;
-
-    /* Removes the http:// from an url. */
-    strcpy(nohttp, url + offset);
-    /* Searches for the uri by looking for the first slash. */
-    pos = strcspn(nohttp, "/");
-    bzero(host,MAXLINE);
-    strncpy(host, nohttp, pos);
-    dbg_printf("EXTRACTED: host: %s\n", host);
-}
-
-/* parseHeaderType - given a header line, this will 
- * insert what the header type is into type
- * type must be pre-allocated */
-void parseHeaderType(char* header, char* type){
-    int pos = 0;
-
-    /* header information type always terminated by ':' */
-    pos = strcspn(header, ":");
-    /* cpy the portion of header upto the ':' */
-    bzero(type,MAXLINE);
-    strncpy(type, header, pos); 
-}
-
-int clientconnected(rio_t *rio_c){
-	int len;
-	char buf[MAXLINE];
-	if((len = rio_readnb(rio_c,buf,MAXLINE))==0){
-		//dbg_printf("client end closed socket\n");
-        return 0;
-	}
-	else{
-	    //dbg_printf("client still connected\n");*/
-		return 1;
-	}
-}
-
-/* Code for threading */
-
-void* thread(void* vargp)
-{
-    int* clientfd;
-    Pthread_detach(pthread_self());
-    while(1){
-        clientfd = Malloc(sizeof(int));
-        /* Remove connfd from the buffer. */
-        *clientfd = sbuf_remove(&sbuf);
-        //        printf("client unqueued.\n");
-        /* Service client. */
-        proc_request((void *)clientfd);
-        //Close((void *)clientfd);
-        //free(clientfd);
-        printf("client disconnected\n");
-    }
-}
-
-/* ------Code for caching and threading---------------------- 
- *
- * lockCacheW & lockCacheR:
- * - prepares the cache for reading & writing respectively
- * - locked items cannot be accessed by 
- * - neccessary to prevent threads from accessing the same
- *   node 'simultaneously'
- * - both block threads so threads can 'queue' (no order)
- *   to access item 
- */
-void lockCacheW() {
-	if(pthread_rwlock_wrlock((pthread_rwlock_t *)&(mycache->lock))) {
-		fprintf(stderr, "Error during Cache Write Lock\n");
-		exit(-1);
-	}
-}
-void lockCacheR() {
-	if(pthread_rwlock_rdlock((pthread_rwlock_t *)&(mycache->lock))) {
-		fprintf(stderr, "Error during Cache Read Lock\n");
-		exit(-1);
-	}
-}
-
-/* unlockCache -  unlocks the previously locked cache */
-void unlockCache() {
-	if(pthread_rwlock_unlock((pthread_rwlock_t *)&(mycache->lock))) {
-		fprintf(stderr, "Error during Cache Unlock\n");
-		exit(-1);
-	}
-}
-
-/* -------------Code for Caching------------------*/
-
-long cacheVacancy(){
-	long remaining = MAX_CACHE;
-
-	lockCacheR();		
-	remaining -= mycache->size;
-	unlockCache();
-		
-	return remaining;
-}
-
-/* initCache - allocates and creates a cache at mycache
- * mostly administrative stuff
- */
-void initCache() {
-	mycache = Calloc(1, sizeof(cache));
-	mycache->head = NULL;
-	mycache->size = 0;
-	/* this is necessary to enable locking */
-	if(pthread_rwlock_init(&(mycache->lock), NULL)) {
-		fprintf(stderr, "Cache initialization failed\n");
-	}
-}
-
-void cacheContent(char *content, char *uri, size_t size){
-	cacheNode *target;
-
-	/* Have to include uri in size */
-	size_t total_size = size + strlen(uri) + 1;
-
-	/* Evict until we have space to fit content */
-	while(total_size < cacheVacancy()) {
-		evictCached();
+	if (2 != argc){
+		fprintf(stderr, "usage: %s <port>\n", argv[0]);
+		exit(EXIT_SUCCESS);
 	}
 
-	lockCacheW();
-	/* Allocate memory for content  */
-	target = Calloc(1, sizeof(struct cacheNode));
-	target->uri = Malloc(strlen(uri) + 1);
-	strcpy(target->uri, uri);
-	target->content = Malloc(size);
-	memcpy(target->content, content, size);
-	target->size = total_size;
-
-	/* Set new content as head */
-	if(mycache->head != NULL) {
-		target->next = mycache->head;
-		mycache->head->prev = target;
-		mycache->head = target;
-		target->prev = NULL;
-		/* set up tail for fresh cache */
-		if(!mycache->tail) mycache->tail = target;
-	} 
-	else
-		mycache->head = target;
-	mycache->size += total_size;
-	unlockCache();
-}
- 
-/* serveCached - serves cached content to client
- * 
- * returns 1  upon successful transmit
- * returns -1 upon write failure
- */
-int serveCached(int clientfd, char *uri){
-	char *content;
-	size_t size;
-	cacheNode *target = getCached(uri);
-
-	/*Update timestamp*/
-	lockCacheW();
-	//target->timestamp = time(NULL);
-	unlockCache();
-	
-	content = target->content;
-	size = target->size;
-
-	lockCacheR();
-	/* serve content to client */
-	if(rio_writen(clientfd, content, size) < 0) {
-		unlockCache();
-		free(uri);
-		Close(clientfd);
-		return -1;
+	/* Create mutex. */
+	if (0 != (pthread_rwlock_init(&cacheLock, NULL)) || 0 != (pthread_mutex_init(&openLock, NULL))){
+		fprintf(stderr, "Error opening listenfd\n");
+		exit(1);
 	}
-	unlockCache();
-	return 1;
+
+	port = atoi(argv[1]);
+	Signal(SIGPIPE, SIG_IGN);
+    initCache();
+	pthread_t concurrThread;
+
+	/* Opens the port provided on the command line. */
+	if(0 > (listenfd = open_listenfd(port))){
+		fprintf(stderr, "Error opening port with open_listenfd.\n");
+		exit(1);
+	}
+
+	while(1){
+		if (NULL == (connfd = malloc(sizeof(int)))){
+			fprintf(stderr, "Error allocating memory for connfd.\n");
+			continue;
+		}
+
+		len = sizeof(addr);
+
+		if(0 > (*connfd = accept(listenfd, (SA *) &addr, &len))){
+			fprintf(stderr, "Error accepting connfd.\n");
+			continue;
+		}
+
+		if (0 != pthread_create(&concurrThread, NULL, thread, connfd)){
+			fprintf(stderr, "Error creating multiple threads.\n");
+			continue;
+		}
+	}
+	exit(EXIT_SUCCESS);
 }
 
-/* evictCached - evicts cached least recently used content */
-void evictCached() {
-	cacheNode *oldest = mycache->tail;
-	
-	lockCacheW();
+/* Request a webpage from the server. */
+void genRequest(int connfd, rio_t *browserio, char *uri, char* host, char* filePath, int numPort){
+	char header[MAXLINE];
+	char content[MAXLINE];
+	char pageBuf[MAXLINE];
+	char cacheBuf[MAXOBJ];
+	char forward[MAXLINE];
+	char req[MAXLINE];
 
-	/* nothing to evict */
-	if(!mycache->tail) return;
-	if(oldest->next != NULL){
-		fprintf(stderr, "Mismanaged Tail");
+	int cacheIndex;
+	size_t size = 0;
+	int bufSize;	
+	rio_t read_response;
+
+	pthread_mutex_lock(&openLock);
+	int serverfd = open_clientfd(host, numPort);
+	pthread_mutex_unlock(&openLock);
+
+    /* Ignores the request if there is an error. */
+	if (0 > serverfd){
+		if (-1 != serverfd){
+			fprintf(stderr, "DNS error\n");
+		}
+		else{
+			fprintf(stderr, "Unix error\n");
+		}
 		return;
 	}
-	
-	if(!oldest->prev){ 
-		/*if tail is also head cache is empty*/
-		mycache->head = NULL;
-		mycache->tail = NULL;
-	}
-	else{ 
-		/* set new tail */
-		mycache->tail = oldest->prev;
-		/* tail has no next */
-		mycache->tail->next = NULL;
-	}
-		
-	/* Update cache size */
-	mycache->size -= oldest->size;
-	free(oldest->uri);
-	free(oldest);
-	unlockCache();
-}
- 
-struct cacheNode *getCached(char *uri){
-	cacheNode *target = mycache->head;
+    /* Read and parse HTTP request headers. */
+	sprintf(req, "GET /%s HTTP/1.0\r\n", filePath);
+	rio_writen(serverfd, req, strlen(req));
+	sprintf(req, "Host: %s\r\n", host);
+	rio_writen(serverfd, req, strlen(req));
 
-	/* block here. can't let others edit during search */
-	lockCacheR();
+	while (0 < (bufSize = rio_readlineb(browserio, forward, MAXLINE))){
+		if (0 == strcmp("\r\n", forward)){
+			break;
+        }
 
-	if(!target) return NULL;
-	while(target){
-		/* return cache ptr if match */
-		if(!strcmp(uri, target->uri)) {
-			unlockCache();
-			return target;
+		*header = *content = 0;
+		sscanf(forward, "%[A-Za-z0-9-]: %s", header, content);
+
+
+		if (0 == strcasecmp("Connection", header) || 0 == strcasecmp("Proxy-Connection", header)){
+			sprintf(forward, "%s: %s\r\n", header, "close");
 		}
-		target = target->next;
+		/* Parse the headers for host and keep alive. */
+		if (0 != strcasecmp("Host", header) && 0 != strcasecmp("Keep-Alive", header)){
+			rio_writen(serverfd, forward, strlen(forward));
+		}
+	}
+	
+	sprintf(req, "Connection: close\r\n");
+	rio_writen(serverfd, req, strlen(req));
+	
+	/* Append carriage return. */
+	sprintf(req, "\r\n");
+	rio_writen(serverfd, req, strlen(req));
+	rio_readinitb(&read_response, serverfd);
+
+	/* Display web page. */
+	while(0 < (bufSize = rio_readlineb(&read_response, pageBuf, MAXLINE))){
+		rio_writen(connfd, pageBuf, bufSize);
+		if(MAXOBJ >= (size + bufSize)){
+			memcpy (cacheBuf + size, pageBuf, bufSize);
+		}
+		size += bufSize;
+	} 
+
+    /* Lock cache before writing to it, and unlock once the writing has been completed. */
+	lockCacheW();
+	if (MAXOBJ >= size){
+		/* Evict the least recently used cache line so that we can insert the new data. */
+		while (MAXCACHE < (overallCacheSize + size) || NUMLINES <= occupiedCacheLines){
+			cacheIndex = leastRecentlyUsed();
+			cacheLineFree(cacheIndex);
+		}
+
+		cacheIndex = cacheVacancy();
+		if (0 <= cacheIndex){
+			cacheAlloc(cacheIndex, cacheBuf, uri, size);
+		}
 	}
 	unlockCache();
-	/* item not in cache */
+	close(serverfd);
+}
+
+
+/* If there are no vacant lines, returns -1. Otherwise, returns the index of the vacant line. */
+int cacheVacancy(){
+	int i;
+	for(i = 0; i < NUMLINES; i++){
+		if(0 == cache[i].LRUstamp){
+			return i;
+		}
+	}
+	return -1;
+}
+
+/* Checks the cache for the url. */
+int cacheCheck(char* url){
+    int i;
+	for(i = 0; i < NUMLINES; i++){
+		if(0 < cache[i].LRUstamp && 0 == strcmp(url, cache[i].url)){
+			return i;
+		}
+	}
+	return -1;
+}
+
+/* Find the LRU cached object. */
+int leastRecentlyUsed(){
+	int i;
+	int leastRecent = -1;
+	for(i= 0; i < NUMLINES; i++){
+		if(0 < cache[i].LRUstamp && (0 > leastRecent ||  cache[leastRecent].LRUstamp > cache[i].LRUstamp)){
+			leastRecent = i;
+        }
+	}
+	return leastRecent;
+}
+
+/* Lock cache for writing. */
+void lockCacheW(){
+    if(pthread_rwlock_wrlock(&cacheLock)){
+        fprintf(stderr, "Error during cache write lock.\n");
+        exit(-1);
+    }
+}
+
+/* Lock cache for reading. */
+void lockCacheR(){
+    if(pthread_rwlock_rdlock(&cacheLock)){
+        fprintf(stderr, "Error during cache read lock.\n");
+        exit(-1);
+    }
+}
+
+/* Unlocks the cache if it has been locked for reading or writing. */
+void unlockCache(){
+    if(pthread_rwlock_unlock(&cacheLock)){
+        fprintf(stderr, "Error during cache unlock.\n");
+        exit(-1);
+    }
+}
+
+/* Frees all memory associated with the specified cache line and updates the properties of the cache. */
+void cacheLineFree(int index){
+	free(cache[index].data);
+	cache[index].data = NULL;
+
+	occupiedCacheLines--;
+	overallCacheSize -= cache[index].size;
+	cache[index].LRUstamp = 0;
+}
+
+/* Initializes the cache. */
+void initCache(){
+    int i;
+	for(i = 0; i < NUMLINES; i++){
+    	cache[i].LRUstamp = 0;
+		pthread_mutex_init(&cache[i].mutex, NULL);
+	}
+}
+
+ /* Processes requests that use GET. */
+void procRequest(int connfd){
+	int numPort = 0;
+	int cacheIndex;
+	size_t n;
+	char scheme[MAXLINE];
+	char req[MAXLINE];
+	char uri[MAXLINE];
+	char method[MAXLINE];
+	char host[MAXLINE];
+	char filePath[MAXLINE];
+	char version[MAXLINE];
+
+	rio_t browserio;
+	rio_readinitb(&browserio, connfd);
+	n = rio_readlineb(&browserio, req, MAXLINE);
+
+	filePath[0] = '\0';
+	host[0] = '\0';
+
+	if (0 < n && 0 != strcmp("\r\n", req)){
+		printf("%s", req);
+
+		/* Parse the method, uri, and version into their own separate variables. */
+		if (3 != sscanf(req, "%s %s %s", method, uri, version)){
+			fprintf(stderr, "Error parsing GET instruction.\n");
+			return;
+		}
+		
+		/* Subsequently, parse uri into host, path, and port number. */
+		if (0 == strcasecmp("GET", method)){
+			if (1 >= sscanf(uri, "%[A-Za-z0-9+.-]://%[^/]%s", scheme, host, filePath)){
+				return;
+			}
+
+			if (strcasecmp("http", scheme)){
+				fprintf(stderr, "Error using specified transfer protocol.\n");
+				return;
+			}
+
+			/* Delete the / from the file path. */
+			if ('/' == filePath[0]){
+				memmove(filePath, 1 + filePath, strlen(filePath));
+			}
+
+			char *p = strchr(host, ':');
+			if (NULL == p){
+				numPort = PORT;
+			}
+			else{
+				sscanf(1 + p, "%d", &numPort);
+				*p = 0;
+            }
+
+			/* Read the cache. Lock while it's in use, and unlock when finished. */
+			lockCacheR();
+			cacheIndex = cacheCheck(uri);
+			unlockCache();
+
+			if(0 <= cacheIndex){
+				rio_writen(connfd, cache[cacheIndex].data, cache[cacheIndex].size);
+				pthread_mutex_lock(&cache[cacheIndex].mutex);
+				cache[cacheIndex].LRUstamp = timeStamp++;
+				pthread_mutex_unlock(&cache[cacheIndex].mutex);
+				printf("Cache hit. Reading from cache.\n");
+			} 
+            else{
+				if (0 != numPort && NULL != filePath && NULL != host){
+					genRequest(connfd, &browserio, uri, host, filePath, numPort);
+					printf("Cache miss. Reading from server.\n");
+				} 
+				else{
+					fprintf(stderr, "Error during url parsing.\n");
+				}	
+			}
+		}
+		printf("Request successfully processed.\n");
+	}
+}
+
+/* Spawn threads. */
+void *thread(void *vargp){
+	int connfd = *((int *)vargp);
+    
+	Pthread_detach(pthread_self());
+    procRequest(connfd);
+    printf("Closing connection.\n\n");
+    close(connfd);
+    free(vargp);
+    
 	return NULL;
+}
+
+/* Dynamically allocating memory for a cache line that will hold the given web page. */
+void cacheAlloc(int cacheIndex, char *content, char *url, size_t size){
+	strcpy(cache[cacheIndex].url, url);
+	cache[cacheIndex].data = malloc(size);
+	if(!cache[cacheIndex].data){
+		printf("Error allocating memory for the data. Malloc unsuccessful.\n");
+		return;
+	}
+
+	memcpy(cache[cacheIndex].data, content, size);
+	
+	cache[cacheIndex].LRUstamp = timeStamp;
+	cache[cacheIndex].size = size;
+
+    occupiedCacheLines++;
+	timeStamp++;
+	overallCacheSize += size;
 }
